@@ -116,12 +116,15 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 
 <h2 style="margin-top:2rem">📋 Backups ({{all_backups|length}})</h2>
 {% if not all_backups %}<div class="empty">No backups yet.</div>{% endif %}
-{% set ns = namespace(current='') %}
+{% set ns = namespace(current='', open=false) %}
 {% for b in all_backups[:50] %}
 {% set key = b.game_mode + '/' + b.save_name %}
 {% if key != ns.current %}
+{% if ns.open %}</div>{% endif %}
 {% set ns.current = key %}
-<h3 style="font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weight:500">{{b.game_mode}} / {{b.save_name[:28]}}</h3>
+{% set ns.open = true %}
+<h3>{{b.game_mode}} / {{b.save_name[:28]}}</h3>
+<div class="grid">
 {% endif %}
 <div class="card">
 <div class="card-header" onclick="this.parentElement.classList.toggle('open')">
@@ -149,6 +152,7 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 </div>
 </div>
 {% endfor %}
+{% if ns.open %}</div>{% endif %}
 <div id="toast" class="toast" style="display:none"></div>
 <div id="settings-overlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);z-index:100;justify-content:center;align-items:center" onclick="if(event.target===this)toggleSettings()">
 <div style="background:var(--surface);padding:2rem;border-radius:var(--radius);max-width:450px;width:90%;border:1px solid var(--accent)">
