@@ -67,17 +67,30 @@ def map_name(save_path: Path) -> str | None:
 
 # ---- player name (players.db) ----
 
-def player_name(save_path: Path) -> str | None:
-    """Return local player name, or None."""
+def player_info(save_path: Path) -> dict | None:
+    """Return player name, status, and position from players.db."""
     path = save_path / "players.db"
     if not path.is_file():
         return None
     try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        cur = conn.execute("SELECT username FROM localPlayers LIMIT 1")
+        cur = conn.execute(
+            "SELECT name, isDead, x, y, z, wx, wy, worldversion FROM localPlayers LIMIT 1"
+        )
         row = cur.fetchone()
         conn.close()
-        return row[0] if row else None
+        if not row:
+            return None
+        return {
+            "name": row[0],
+            "is_dead": bool(row[1]),
+            "x": round(row[2]) if row[2] else 0,
+            "y": round(row[3]) if row[3] else 0,
+            "z": round(row[4]) if row[4] else 0,
+            "wx": row[5],
+            "wy": row[6],
+            "world_version": row[7],
+        }
     except Exception:
         return None
 
@@ -200,9 +213,13 @@ def extract_all(save_path: Path) -> dict:
     if mn:
         info["map_name"] = mn
 
-    pn = player_name(save_path)
+    pn = player_info(save_path)
     if pn:
-        info["player"] = pn
+        info["player"] = pn["name"]
+        info["player_dead"] = pn["is_dead"]
+        info["player_x"] = pn["x"]
+        info["player_y"] = pn["y"]
+        info["player_world_version"] = pn["world_version"]
 
     mods = parse_mods(save_path)
     if mods is not None:
