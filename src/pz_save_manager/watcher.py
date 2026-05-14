@@ -57,6 +57,7 @@ class WatcherManager:
     def __init__(self) -> None:
         self._observer = Observer()
         self._watchers: dict[str, SaveWatcher] = {}
+        self._watches: dict[str, object] = {}  # watchdog handles
         self._running = False
 
     @property
@@ -80,13 +81,16 @@ class WatcherManager:
             return self._watchers[key]
         watcher = SaveWatcher(save, debounce_seconds)
         self._watchers[key] = watcher
-        self._observer.schedule(watcher, str(save.path), recursive=True)
+        handle = self._observer.schedule(watcher, str(save.path), recursive=True)
+        self._watches[key] = handle
         return watcher
 
     def unwatch(self, save: SaveGame) -> None:
         key = save.display_name
+        if key in self._watches:
+            self._observer.unschedule(self._watches[key])
+            del self._watches[key]
         if key in self._watchers:
-            self._observer.unschedule(self._watchers[key])
             del self._watchers[key]
 
     def watched_saves(self) -> list[str]:
