@@ -31,7 +31,8 @@ header h1{font-size:1.3rem;font-weight:700}header h1 span{color:var(--accent)}
 .badge{background:var(--accent2);padding:.3rem .7rem;border-radius:20px;font-weight:500}
 .badge.on{background:var(--green);color:#000}.badge.off{background:var(--accent2)}
 .container{max-width:900px;margin:0 auto;padding:1.5rem}
-h2{font-size:1rem;margin-bottom:.8rem;color:var(--muted);text-transform:uppercase;letter-spacing:1px}
+h2{font-size:1rem;margin-bottom:.8rem;color:var(--accent);text-transform:uppercase;letter-spacing:1px;padding:.4rem 0;border-bottom:1px solid rgba(255,255,255,.08)}
+h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weight:500}
 /* Compact card */
 .card{background:var(--card);border-radius:var(--radius);border:1px solid rgba(255,255,255,.05);margin-bottom:.7rem;overflow:hidden;transition:border .15s}
 .card:hover{border-color:rgba(255,255,255,.15)}
@@ -120,7 +121,7 @@ h2{font-size:1rem;margin-bottom:.8rem;color:var(--muted);text-transform:uppercas
 {% set key = b.game_mode + '/' + b.save_name %}
 {% if key != ns.current %}
 {% set ns.current = key %}
-<h3 style="font-size:.85rem;color:var(--accent);margin:1.2rem 0 .4rem;padding:0">▸ {{b.game_mode}} / {{b.save_name[:28]}}</h3>
+<h3 style="font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weight:500">{{b.game_mode}} / {{b.save_name[:28]}}</h3>
 {% endif %}
 <div class="card">
 <div class="card-header" onclick="this.parentElement.classList.toggle('open')">
