@@ -129,7 +129,7 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 {% endif %}
 <div class="card">
 <div class="card-header" onclick="this.parentElement.classList.toggle('open')">
-{% if b.has_thumbnail %}<img src="/thumb-backup/{{b.game_mode}}/{{b.real_save_name}}/{{b.timestamp}}" class="thumb" loading="lazy">{% else %}<div class="thumb"></div>{% endif %}
+{% if b.has_thumbnail %}<img src="/thumb-backup/{{b.game_mode}}/{{b.save_name}}/{{b.timestamp}}" class="thumb" loading="lazy">{% else %}<div class="thumb"></div>{% endif %}
 <div class="info">
 <div class="name" title="{{b.timestamp}}">{{b.timestamp}}</div>
 <div class="sub">{{b.age}} · {{b.size}} · {{b.files}} fichiers{% if b.auto %} · 🤖 auto{% else %} · ✋ manuel{% endif %}</div>
@@ -148,8 +148,8 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 <div class="detail-item"><strong>Save</strong> {{b.game_mode}} / {{b.save_name[:30]}}</div>
 </div>
 <div class="actions">
-<button class="btn btn-green" onclick="event.stopPropagation();restore('{{b.game_mode}}','{{b.real_save_name}}','{{b.timestamp}}',this)">↩ Restore</button>
-<button class="btn btn-red btn-sm" onclick="event.stopPropagation();deleteBackup('{{b.game_mode}}','{{b.real_save_name}}','{{b.timestamp}}',this)">🗑 Delete</button>
+<button class="btn btn-green" onclick="event.stopPropagation();restore('{{b.game_mode}}','{{b.save_name}}','{{b.timestamp}}',this)">↩ Restore</button>
+<button class="btn btn-red btn-sm" onclick="event.stopPropagation();deleteBackup('{{b.game_mode}}','{{b.save_name}}','{{b.timestamp}}',this)">🗑 Delete</button>
 </div>
 </div>
 </div>
@@ -185,12 +185,6 @@ function deleteBackup(m,n,t,b){if(!confirm('Delete backup '+t+'?'))return;b.disa
 </html>"""
 
 
-def _censor(name: str) -> str:
-    """Hide server IP addresses in display names."""
-    import re
-    return re.sub(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(_\d+)?', '***.***.***.***', name)
-
-
 def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
     path = save.path
     # Truncate display name for compact view
@@ -205,7 +199,7 @@ def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
     backups = list_backups(save.game_mode, save.name)
     extra = extract_all(path)
     info = {
-        "game_mode": save.game_mode, "name": _censor(short_name), "full_name": save.name,
+        "game_mode": save.game_mode, "name": short_name, "full_name": save.name,
         "modified": modified, "file_count": file_count,
         "size_mb": round(total_size / (1024 * 1024), 1),
         "has_thumbnail": extra.get("has_thumbnail", False),
@@ -239,7 +233,7 @@ def index():
     for b in all_backups:
         pi = extract_all(b.path)
         all_b.append({
-            "game_mode": b.game_mode, "save_name": _censor(b.save_name), "real_save_name": b.save_name,
+            "game_mode": b.game_mode, "save_name": b.save_name,
             "timestamp": b.timestamp, "auto": b.auto,
             "size": f"{b.size_mb} MB", "files": b.file_count, "age": b.age,
             "has_thumbnail": (b.path / "thumb.png").is_file(),
