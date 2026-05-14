@@ -1,0 +1,110 @@
+"""File watcher for automatic save backups using watchdog."""
+
+from __future__ import annotations
+
+import threading
+import time
+from pathlib import Path
+
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+
+from .backup import BackupRecord, create_backup
+from .saves import SaveGame
+
+
+class SaveWatcher(FileSystemEventHandler):
+    """Watches a save directory and creates backups after changes settle."""
+
+    def __init__(
+        self,
+        save: SaveGame,
+        debounce_seconds: float = 5.0,
+        on_backup: callable | None = None,
+    ) -> None:
+        self.save = save
+        self.debounce_seconds = debounce_seconds
+        self.on_backup = on_backup
+        self._last_event = 0.0
+        self._timer: threading.Timer | None = None
+        self._lock = threading.Lock()
+        self._backups: list[BackupRecord] = []
+
+    def on_modified(self, event) -> None:
+        if event.is_directory:
+            return
+        with self._lock:
+            self._last_event = time.time()
+            if self._timer is not None:
+                self._timer.cancel()
+            self._timer = threading.Timer(self.debounce_seconds, self._do_backup)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def _do_backup(self) -> None:
+        try:
+            backup = create_backup(self.save.game_mode, self.save.name)
+            self._backups.append(backup)
+            if self.on_backup:
+                self.on_backup(backup)
+        except Exception:
+            pass  # Silent fail during auto-backup
+
+
+class WatcherManager:
+    """Manages multiple SaveWatcher instances."""
+
+    def __init__(self) -> None:
+        self._observer = Observer()
+        self._watchers: dict[str, SaveWatcher] = {}
+        self._running = False
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    def start(self) -> None:
+        if not self._running:
+            self._observer.start()
+            self._running = True
+
+    def stop(self) -> None:
+        if self._running:
+            self._observer.stop()
+            self._observer.join(timeout=5)
+            self._running = False
+
+    def watch(self, save: SaveGame, debounce_seconds: float = 5.0) -> SaveWatcher:
+        key = save.display_name
+        if key in self._watchers:
+            return self._watchers[key]
+        watcher = SaveWatcher(save, debounce_seconds)
+        self._watchers[key] = watcher
+        self._observer.schedule(watcher, str(save.path), recursive=True)
+        return watcher
+
+    def unwatch(self, save: SaveGame) -> None:
+        key = save.display_name
+        if key in self._watchers:
+            self._observer.unschedule(self._watchers[key])
+            del self._watchers[key]
+
+    def watched_saves(self) -> list[str]:
+        return sorted(self._watchers.keys())
+
+    def get_backups(self, save: SaveGame) -> list[BackupRecord]:
+        key = save.display_name
+        if key in self._watchers:
+            return list(self._watchers[key]._backups)
+        return []
+
+
+# Global instance
+_manager: WatcherManager | None = None
+
+
+def get_manager() -> WatcherManager:
+    global _manager
+    if _manager is None:
+        _manager = WatcherManager()
+    return _manager

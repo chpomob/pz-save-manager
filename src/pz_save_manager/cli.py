@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .backup import BackupError, BackupNotFound, create_backup, delete_backup, list_backups, restore_backup
+from .gui import run_gui
 from .platforms import get_backups_root, get_saves_root
 from .saves import SaveNotFound, get_save_modified_time, list_saves
 
@@ -124,6 +125,22 @@ def delete_command(ctx: click.Context, game_mode: str, save_name: str, timestamp
     except (BackupNotFound, BackupError) as exc:
         raise click.ClickException(str(exc)) from exc
     console.print(f"[green]Backup deleted:[/green] {backup.display_name}")
+
+
+@main.command("gui")
+@click.option("--host", default="127.0.0.1", help="Host to bind to.")
+@click.option("--port", default=8080, type=int, help="Port to listen on.")
+@click.option("--no-browser", is_flag=True, help="Don't open browser automatically.")
+def gui_command(host: str, port: int, no_browser: bool) -> None:
+    """Launch the web GUI."""
+    if no_browser:
+        import flask
+        # We still want the GUI but without browser open
+        from .gui import app
+        print(f"\n  🧟 PZ Save Manager — http://{host}:{port}\n")
+        app.run(host=host, port=port, debug=False)
+    else:
+        run_gui(host, port)
 
 
 main.add_command(list_saves_command, "list-saves")

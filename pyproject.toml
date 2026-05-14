@@ -12,6 +12,8 @@ dependencies = [
     "click>=8.0",
     "rich>=13.0",
     "platformdirs>=4.0",
+    "flask>=3.0",
+    "watchdog>=4.0",
 ]
 
 [project.optional-dependencies]
