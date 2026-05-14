@@ -23,14 +23,56 @@ class BackupNotFound(BackupError):
 @dataclass(frozen=True)
 class BackupRecord:
     """A full-directory save backup."""
+
     game_mode: str
     save_name: str
     timestamp: str
     path: Path
+    auto: bool = False
 
     @property
     def display_name(self) -> str:
         return f"{self.game_mode}/{self.save_name}/{self.timestamp}"
+
+    @property
+    def file_count(self) -> int:
+        try:
+            return sum(1 for _ in self.path.rglob("*") if _.is_file())
+        except OSError:
+            return 0
+
+    @property
+    def size_mb(self) -> float:
+        try:
+            total = sum(_.stat().st_size for _ in self.path.rglob("*") if _.is_file())
+            return round(total / (1024 * 1024), 1)
+        except OSError:
+            return 0.0
+
+    @property
+    def age(self) -> str:
+        """Human-readable relative time (e.g. '3 hours ago')."""
+        try:
+            dt = datetime.strptime(self.timestamp, "%Y%m%d-%H%M%S")
+        except ValueError:
+            return self.timestamp
+        delta = datetime.now() - dt
+        seconds = delta.total_seconds()
+        if seconds < 60:
+            return "just now"
+        mins = int(seconds / 60)
+        if mins < 60:
+            return f"{mins} min ago"
+        hours = int(mins / 60)
+        if hours < 24:
+            return f"{hours}h ago"
+        days = int(hours / 24)
+        if days < 7:
+            return f"{days}d ago"
+        weeks = int(days / 7)
+        if weeks < 5:
+            return f"{weeks}w ago"
+        return dt.strftime("%d/%m/%Y")
 
 
 def _root(path: Path | str | None, default: Path) -> Path:

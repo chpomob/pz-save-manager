@@ -96,6 +96,7 @@ h2{font-size:1.1rem;margin-bottom:1rem;color:var(--muted);text-transform:upperca
       {% for b in save.backups[:5] %}
       <div class="backup-item">
         <span class="ts">{{b.timestamp}}</span>
+        <span style="font-size:.75rem;color:var(--muted)">{{b.age}} · {{b.size}} · {{b.files}} files {% if b.auto %}· 🤖 auto{% endif %}</span>
         <button class="btn btn-sm btn-green" onclick="restore('{{b.game_mode}}','{{b.save_name}}','{{b.timestamp}}',this)">↩ Restore</button>
       </div>
       {% endfor %}
@@ -115,6 +116,7 @@ h2{font-size:1.1rem;margin-bottom:1rem;color:var(--muted);text-transform:upperca
   <div class="card">
     <h3>{{b.save_name}}</h3>
     <div class="mode">{{b.game_mode}} &middot; {{b.timestamp}}</div>
+    <div class="meta">{{b.age}} · {{b.size}} · {{b.files}} files {% if b.auto %}· 🤖 auto{% endif %}</div>
     <button class="btn btn-green btn-sm" onclick="restore('{{b.game_mode}}','{{b.save_name}}','{{b.timestamp}}',this)">↩ Restore</button>
   </div>
   {% endfor %}
@@ -153,7 +155,11 @@ def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
         "modified": modified,
         "file_count": file_count,
         "size_mb": round(total_size / (1024 * 1024), 1),
-        "backups": [{"game_mode": b.game_mode, "save_name": b.save_name, "timestamp": b.timestamp} for b in backups[:5]],
+        "backups": [{
+            "game_mode": b.game_mode, "save_name": b.save_name,
+            "timestamp": b.timestamp, "auto": b.auto,
+            "size": f"{b.size_mb} MB", "files": b.file_count, "age": b.age,
+        } for b in backups[:5]],
         "watched": save.display_name in manager.watched_saves(),
     }
 
@@ -166,7 +172,11 @@ def index():
     saves = list_saves()
     save_infos = [_save_info(s, manager) for s in saves]
     all_backups = list_backups()
-    all_b = [{"game_mode": b.game_mode, "save_name": b.save_name, "timestamp": b.timestamp} for b in all_backups]
+    all_b = [{
+        "game_mode": b.game_mode, "save_name": b.save_name,
+        "timestamp": b.timestamp, "auto": b.auto,
+        "size": f"{b.size_mb} MB", "files": b.file_count, "age": b.age,
+    } for b in all_backups]
     return render_template_string(
         PAGE,
         saves=save_infos,

@@ -44,6 +44,15 @@ class SaveWatcher(FileSystemEventHandler):
     def _do_backup(self) -> None:
         try:
             backup = create_backup(self.save.game_mode, self.save.name)
+            # Mark as auto-backup by creating a new record with auto=True
+            from .backup import BackupRecord
+            backup = BackupRecord(
+                game_mode=backup.game_mode,
+                save_name=backup.save_name,
+                timestamp=backup.timestamp,
+                path=backup.path,
+                auto=True,
+            )
             self._backups.append(backup)
             if self.on_backup:
                 self.on_backup(backup)
