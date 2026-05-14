@@ -108,40 +108,41 @@ h2{font-size:1rem;margin-bottom:.8rem;color:var(--muted);text-transform:uppercas
 <button class="btn btn-accent" onclick="event.stopPropagation();backup('{{save.game_mode}}','{{save.full_name}}',this)">💾 Backup</button>
 <button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick="event.stopPropagation();toggleWatch('{{save.game_mode}}','{{save.full_name}}',this)">{{'⏸ Unwatch' if save.watched else '👁 Watch'}}</button>
 </div>
-<div class="backup-list">
-<div style="font-size:.8rem;color:var(--muted);margin-bottom:.3rem">Backups:</div>
-{% if save.backups %}
-{% for b in save.backups[:5] %}
-<div class="backup-item" title="{{b.timestamp}} · {{b.size}} · {{b.files}} files{% if b.auto %} · auto{% endif %}">
-<span class="ts">{{b.age}}</span>
-<span style="font-size:.72rem;color:var(--muted)">{{b.size}} · {{b.files}}f {% if b.auto %}🤖{% endif %}</span>
-<span style="flex:1"></span>
-<button class="btn btn-sm btn-green" onclick="event.stopPropagation();restore('{{b.game_mode}}','{{b.save_name}}','{{b.timestamp}}',this)">↩</button>
-</div>
-{% endfor %}
-{% else %}
-<div class="backup-item"><span style="color:var(--muted)">None yet</span></div>
-{% endif %}
-</div>
 </div>
 </div>
 {% endfor %}
 </div>
-<h2 style="margin-top:2rem">📋 All Backups ({{all_backups|length}})</h2>
+
+<h2 style="margin-top:2rem">📋 Backups ({{all_backups|length}})</h2>
 {% if not all_backups %}<div class="empty">No backups yet.</div>{% endif %}
-<div class="grid">
-{% for b in all_backups[:30] %}
-<div class="card" style="padding:.8rem 1rem">
-<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.3rem">
-<div>
-<div style="font-weight:600;font-size:.85rem">{{b.save_name[:30]}}</div>
-<div style="font-size:.72rem;color:var(--muted)">{{b.game_mode}} · {{b.timestamp}} · {{b.age}} · {{b.size}} · {{b.files}}f {% if b.auto %}🤖 auto{% endif %}</div>
+{% set ns = namespace(current='') %}
+{% for b in all_backups[:50] %}
+{% set key = b.game_mode + '/' + b.save_name %}
+{% if key != ns.current %}
+{% set ns.current = key %}
+<h3 style="font-size:.9rem;color:var(--accent);margin:1rem 0 .4rem;padding:0">▸ {{b.game_mode}} / {{b.save_name[:30]}}</h3>
+{% endif %}
+<div class="card" style="margin-bottom:.3rem">
+<div class="card-header" style="padding:.5rem .8rem" onclick="this.parentElement.classList.toggle('open')">
+<div class="info" style="flex:1">
+<div class="name" style="font-size:.8rem" title="{{b.timestamp}}">{{b.timestamp}}{% if b.auto %} · 🤖 auto{% endif %}</div>
+<div class="sub" style="font-size:.68rem">{{b.age}} · {{b.size}} · {{b.files}} fichiers</div>
 </div>
-<button class="btn btn-sm btn-green" onclick="restore('{{b.game_mode}}','{{b.save_name}}','{{b.timestamp}}',this)">↩ Restore</button>
+<span class="arrow" style="font-size:1rem">▾</span>
+</div>
+<div class="card-body" style="padding:.5rem .8rem">
+<div class="detail-grid">
+<div class="detail-item"><strong>Timestamp</strong> {{b.timestamp}}</div>
+<div class="detail-item"><strong>Age</strong> {{b.age}}</div>
+<div class="detail-item"><strong>Size</strong> {{b.size}}</div>
+<div class="detail-item"><strong>Files</strong> {{b.files}}</div>
+<div class="detail-item"><strong>Type</strong> {% if b.auto %}Automatic{% else %}Manual{% endif %}</div>
+<div class="detail-item"><strong>Save</strong> {{b.game_mode}} / {{b.save_name[:30]}}</div>
+</div>
+<button class="btn btn-green btn-sm" onclick="event.stopPropagation();restore('{{b.game_mode}}','{{b.save_name}}','{{b.timestamp}}',this)">↩ Restore this version</button>
 </div>
 </div>
 {% endfor %}
-</div>
 <div id="toast" class="toast" style="display:none"></div>
 <div id="settings-overlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);z-index:100;justify-content:center;align-items:center" onclick="if(event.target===this)toggleSettings()">
 <div style="background:var(--surface);padding:2rem;border-radius:var(--radius);max-width:450px;width:90%;border:1px solid var(--accent)">
