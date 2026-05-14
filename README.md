@@ -1,56 +1,61 @@
 # PZ Save Manager
 
-Gestionnaire de sauvegardes pour Project Zomboid — multi-plateforme (Windows/Linux/macOS).
+Gestionnaire de sauvegardes pour Project Zomboid — simple, visuel, automatique.
 
-## Fonctionnalités prévues
+## Vision
 
-### V1 — Backup Manager
-- Backup complet d'une sauvegarde avec timestamp
-- Restauration complète
-- Liste et gestion des backups
-- Détection automatique du dossier Zomboid
+Un outil qui tourne en arrière-plan, détecte automatiquement quand tu joues,
+sauvegarde tes parties **sans que tu aies à y penser**, et te permet de
+restaurer n'importe quelle version en un clic.
 
-### V2 — Restauration par chunks
-- Backup/restore de chunks individuels (cellules 10x10)
-- Restaurer sa base sans toucher au reste du monde
-- Intégration pzdataspec pour parsing binaire
+## Fonctionnalités
 
-### V3 — Sauvegarde de personnage
-- Extraction du joueur d'un chunk
-- Réinjection dans une autre sauvegarde
-- Contourne la permadeath
+- **Auto-détection** : surveille les sauvegardes et crée un backup dès qu'un fichier change
+- **Interface graphique** : pas de ligne de commande, une vraie UI
+- **Visualisation** : aperçu de la carte et des infos de la sauvegarde
+- **Restore one-click** : retour à n'importe quelle version précédente
+- **Multi-plateforme** : Windows, Linux, macOS
+- **Git-friendly** : les backups sont versionnés
 
-## Stack technique
+## Installation
 
-- Python 3.10+
-- kaitaistruct — parsing binaire
-- sqlite3 — vehicles.db, players.db (stdlib)
-- platformdirs — chemins cross-platform
-- click — CLI
-- pzdataspec — spécifications de format (intégré)
+```bash
+pip install pz-save-manager
+pz-saves gui    # lance l'interface graphique
+```
 
-## Structure du projet
+## Développement
+
+```bash
+git clone https://github.com/chpomob/pz-save-manager.git
+cd pz-save-manager
+pip install -e ".[dev]"
+pytest
+```
+
+## Stack
+
+- **UI** : Textual (TUI riche) ou Tkinter
+- **Watchdog** : surveillance des fichiers en temps réel
+- **Parsing** : pzdataspec (Kaitai Struct) pour la lecture des sauvegardes
+- **Visualisation** : rendu de carte via pzmap2dzi
+
+## Structure
 
 ```
 pz-save-manager/
-├── README.md
-├── docs/
-│   └── project_zomboid_save_format_research.md
-├── src/
-│   └── pz_save_manager/
-│       ├── __init__.py
-│       ├── cli.py
-│       ├── saves.py
-│       ├── backup.py
-│       └── platforms.py
+├── docs/           # Documentation et recherches
+├── src/pz_save_manager/
+│   ├── cli.py      # Commandes CLI
+│   ├── gui.py      # Interface graphique
+│   ├── saves.py    # Découverte des sauvegardes
+│   ├── backup.py   # Backup/restore
+│   ├── watcher.py  # Surveillance auto
+│   └── platforms.py # Chemins cross-platform
 ├── tests/
-├── pyproject.toml
-└── .gitignore
+└── pyproject.toml
 ```
 
-## Sources
+## Licence
 
-- pzdataspec (GitHub: cff29546/pzdataspec) — specs Kaitai Struct
-- pzmap2dzi (109 ⭐) — rendu de carte
-- pz-webmap (62 ⭐) — carte web interactive
-- Save location: `~/Zomboid/Saves/<GameMode>/<SaveName>/`
+MIT

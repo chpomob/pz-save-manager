@@ -1,0 +1,175 @@
+"""Backup and restore operations for full Project Zomboid save directories."""
+
+from __future__ import annotations
+
+import shutil
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from uuid import uuid4
+
+from .platforms import get_backups_root, get_saves_root
+from .saves import SaveGame, SaveManagerError, get_save
+
+
+class BackupError(SaveManagerError):
+    """Base error for backup operations."""
+
+
+class BackupNotFound(BackupError):
+    """Raised when a backup directory cannot be found."""
+
+
+@dataclass(frozen=True)
+class BackupRecord:
+    """A full-directory save backup."""
+    game_mode: str
+    save_name: str
+    timestamp: str
+    path: Path
+
+    @property
+    def display_name(self) -> str:
+        return f"{self.game_mode}/{self.save_name}/{self.timestamp}"
+
+
+def _root(path: Path | str | None, default: Path) -> Path:
+    return Path(path).expanduser() if path is not None else default
+
+
+def _validate_component(value: str, label: str) -> None:
+    if value in {"", ".", ".."} or "/" in value or chr(92) in value:
+        raise BackupError(f"Invalid {label}: {value!r}")
+
+
+def _backup_path(game_mode: str, save_name: str, timestamp: str, backups_root: Path | str | None) -> Path:
+    _validate_component(game_mode, "game mode")
+    _validate_component(save_name, "save name")
+    _validate_component(timestamp, "timestamp")
+    return _root(backups_root, get_backups_root()) / game_mode / save_name / timestamp
+
+
+def _timestamp(now: datetime | None = None) -> str:
+    return (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
+
+
+def _unique_destination(base_dir: Path, timestamp: str) -> tuple[str, Path]:
+    destination = base_dir / timestamp
+    if not destination.exists():
+        return timestamp, destination
+    for index in range(1, 100):
+        candidate_timestamp = f"{timestamp}-{index:02d}"
+        candidate = base_dir / candidate_timestamp
+        if not candidate.exists():
+            return candidate_timestamp, candidate
+    raise BackupError(f"Could not allocate a unique backup under {base_dir}")
+
+
+def create_backup(
+    game_mode: str,
+    save_name: str,
+    *,
+    saves_root: Path | str | None = None,
+    backups_root: Path | str | None = None,
+    now: datetime | None = None,
+) -> BackupRecord:
+    """Create a timestamped full backup for a save directory."""
+    _validate_component(game_mode, "game mode")
+    _validate_component(save_name, "save name")
+    save = get_save(game_mode, save_name, saves_root=saves_root)
+    backup_base = _root(backups_root, get_backups_root()) / game_mode / save_name
+    backup_base.mkdir(parents=True, exist_ok=True)
+    timestamp, destination = _unique_destination(backup_base, _timestamp(now))
+    shutil.copytree(save.path, destination, copy_function=shutil.copy2)
+    return BackupRecord(game_mode, save_name, timestamp, destination)
+
+
+def list_backups(
+    game_mode: str | None = None,
+    save_name: str | None = None,
+    *,
+    backups_root: Path | str | None = None,
+) -> list[BackupRecord]:
+    """List backups, optionally filtered by game mode and save name."""
+    if save_name is not None and game_mode is None:
+        raise BackupError("A game mode is required when filtering by save name")
+    root = _root(backups_root, get_backups_root())
+    if not root.is_dir():
+        return []
+    records: list[BackupRecord] = []
+    mode_dirs = [root / game_mode] if game_mode else [path for path in root.iterdir() if path.is_dir()]
+    for mode_dir in mode_dirs:
+        if not mode_dir.is_dir():
+            continue
+        save_dirs = [mode_dir / save_name] if save_name else [path for path in mode_dir.iterdir() if path.is_dir()]
+        for save_dir in save_dirs:
+            if not save_dir.is_dir():
+                continue
+            for backup_dir in save_dir.iterdir():
+                if backup_dir.is_dir():
+                    records.append(BackupRecord(mode_dir.name, save_dir.name, backup_dir.name, backup_dir))
+    return sorted(
+        records,
+        key=lambda backup: (backup.game_mode.casefold(), backup.save_name.casefold(), backup.timestamp),
+        reverse=True,
+    )
+
+
+def get_backup(
+    game_mode: str,
+    save_name: str,
+    timestamp: str,
+    *,
+    backups_root: Path | str | None = None,
+) -> BackupRecord:
+    """Return a specific backup or raise BackupNotFound."""
+    path = _backup_path(game_mode, save_name, timestamp, backups_root)
+    if not path.is_dir():
+        raise BackupNotFound(f"Backup not found: {game_mode}/{save_name}/{timestamp}")
+    return BackupRecord(game_mode, save_name, timestamp, path)
+
+
+def restore_backup(
+    game_mode: str,
+    save_name: str,
+    timestamp: str,
+    *,
+    saves_root: Path | str | None = None,
+    backups_root: Path | str | None = None,
+) -> SaveGame:
+    """Restore a backup over the live save directory."""
+    backup = get_backup(game_mode, save_name, timestamp, backups_root=backups_root)
+    target = _root(saves_root, get_saves_root()) / game_mode / save_name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_target = target.with_name(f".{target.name}.restore-{uuid4().hex}.tmp")
+    previous_target = target.with_name(f".{target.name}.restore-old-{uuid4().hex}")
+    try:
+        shutil.copytree(backup.path, temp_target, copy_function=shutil.copy2)
+        if target.exists():
+            target.rename(previous_target)
+        temp_target.rename(target)
+    except OSError as exc:
+        if temp_target.exists():
+            shutil.rmtree(temp_target, ignore_errors=True)
+        if previous_target.exists() and not target.exists():
+            previous_target.rename(target)
+        raise BackupError(f"Could not restore backup: {exc}") from exc
+    if previous_target.exists():
+        shutil.rmtree(previous_target)
+    return SaveGame(game_mode, save_name, target)
+
+
+def delete_backup(
+    game_mode: str,
+    save_name: str,
+    timestamp: str,
+    *,
+    backups_root: Path | str | None = None,
+) -> BackupRecord:
+    """Delete a backup directory."""
+    backup = get_backup(game_mode, save_name, timestamp, backups_root=backups_root)
+    try:
+        shutil.rmtree(backup.path)
+    except OSError as exc:
+        raise BackupError(f"Could not delete backup: {exc}") from exc
+    return backup
