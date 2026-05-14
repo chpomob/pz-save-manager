@@ -143,6 +143,40 @@ def gui_command(host: str, port: int, no_browser: bool) -> None:
         run_gui(host, port)
 
 
+@main.command("config")
+@click.argument("key", required=False)
+@click.argument("value", required=False)
+def config_command(key: str | None, value: str | None) -> None:
+    """View or set configuration. 'pz-saves config' shows all."""
+    from .config import get_all, set_
+
+    if key is None:
+        cfg = get_all()
+        console.print("[bold]Configuration:[/bold]")
+        for k, v in cfg.items():
+            console.print(f"  {k}: {v}")
+        return
+
+    if value is None:
+        from .config import get
+        console.print(f"{key} = {get(key)}")
+        return
+
+    # Convert types
+    if key in ("debounce_seconds",):
+        value = float(value)  # type: ignore
+    elif key in ("port", "auto_start_watcher"):
+        if value.lower() in ("true", "1", "yes"):
+            value = True  # type: ignore
+        elif value.lower() in ("false", "0", "no"):
+            value = False  # type: ignore
+        else:
+            value = int(value)  # type: ignore
+
+    set_(key, value)
+    console.print(f"[green]{key} = {value}[/green]")
+
+
 @main.command("install")
 def install_command() -> None:
     """Create desktop shortcuts and launchers."""

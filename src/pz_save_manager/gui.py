@@ -8,6 +8,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template_string, request, send_file
 
 from .backup import BackupError, BackupNotFound, create_backup, list_backups, restore_backup
+from .config import get_all as config_get_all, set_ as config_set
 from .platforms import get_backups_root, get_saves_root
 from .save_info import extract_all
 from .saves import SaveGame, SaveNotFound, get_save_modified_time, list_saves
@@ -70,6 +71,7 @@ h2{font-size:1rem;margin-bottom:.8rem;color:var(--muted);text-transform:uppercas
 <div class="status">
 <span>Watcher: <span class="badge {{'on' if watcher_running else 'off'}}">{{'RUNNING' if watcher_running else 'STOPPED'}}</span></span>
 <button class="btn btn-sm {{'btn-red' if watcher_running else 'btn-green'}}" onclick="toggleWatcher()">{{'Stop' if watcher_running else 'Start'}} Watcher</button>
+<button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick="toggleSettings()">⚙</button>
 </div>
 </header>
 <div class="container">
@@ -124,6 +126,19 @@ h2{font-size:1rem;margin-bottom:.8rem;color:var(--muted);text-transform:uppercas
 {% endfor %}
 </div>
 <div id="toast" class="toast" style="display:none"></div>
+<div id="settings-overlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);z-index:100;justify-content:center;align-items:center" onclick="if(event.target===this)toggleSettings()">
+<div style="background:var(--surface);padding:2rem;border-radius:var(--radius);max-width:450px;width:90%;border:1px solid var(--accent)">
+<h3 style="margin-bottom:1rem">⚙ Settings</h3>
+<div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted)">Backup directory</label>
+<input id="cfg-backups-dir" style="width:100%;padding:.5rem;margin-top:.3rem;background:var(--bg);border:1px solid var(--accent2);color:var(--text);border-radius:6px" placeholder="Default: ~/.pz-save-manager/backups"></div>
+<div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted)">Auto-backup delay (seconds)</label>
+<input id="cfg-debounce" type="number" step="1" min="1" max="60" style="width:100%;padding:.5rem;margin-top:.3rem;background:var(--bg);border:1px solid var(--accent2);color:var(--text);border-radius:6px"></div>
+<div style="display:flex;gap:.5rem;justify-content:flex-end">
+<button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick="toggleSettings()">Cancel</button>
+<button class="btn btn-sm btn-green" onclick="saveSettings()">Save</button>
+</div>
+</div>
+</div>
 <script>
 function toast(m,c){var t=document.getElementById('toast');t.textContent=m;t.style.background=c||'var(--green)';t.style.display='block';setTimeout(function(){t.style.display='none'},2500)}
 function api(m,u,b){return fetch(u,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined})}
@@ -131,6 +146,8 @@ function backup(m,n,b){b.disabled=true;api('POST','/api/backup',{game_mode:m,sav
 function restore(m,n,t,b){if(!confirm('Restore '+m+'/'+n+' from '+t+'?'))return;b.disabled=true;api('POST','/api/restore',{game_mode:m,save_name:n,timestamp:t}).then(r=>r.json()).then(d=>{d.ok?toast('Restored!'):toast(d.error,'var(--red)');location.reload()})}
 function toggleWatcher(){api('POST','/api/watcher/toggle').then(r=>r.json()).then(d=>{toast(d.message);location.reload()})}
 function toggleWatch(m,n,b){b.disabled=true;api('POST','/api/watcher/save',{game_mode:m,save_name:n}).then(r=>r.json()).then(d=>{toast(d.message);location.reload()})}
+function toggleSettings(){var o=document.getElementById('settings-overlay');if(o.style.display==='flex'){o.style.display='none'}else{o.style.display='flex';api('GET','/api/config').then(r=>r.json()).then(d=>{document.getElementById('cfg-backups-dir').value=d.backups_dir||'';document.getElementById('cfg-debounce').value=d.debounce_seconds})}}
+function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,debounce_seconds:document.getElementById('cfg-debounce').value};api('POST','/api/config',data).then(r=>r.json()).then(d=>{d.ok?toast('Settings saved! Reloading...'):toast('Error','var(--red)');setTimeout(function(){location.reload()},1000)})}
 </script>
 </body>
 </html>"""
@@ -222,6 +239,21 @@ def api_watcher_save():
     if not manager.running:
         manager.start()
     return jsonify({"ok": True, "message": f"Watching {save.name}"})
+
+
+@app.route("/api/config", methods=["GET", "POST"])
+def api_config():
+    """Get or update configuration."""
+    if request.method == "GET":
+        return jsonify(config_get_all())
+    data = request.get_json()
+    for key, value in data.items():
+        if value == "" or value is None:
+            continue
+        if key in ("debounce_seconds", "port"):
+            value = float(value) if "." in str(value) else int(value)
+        config_set(key, value)
+    return jsonify({"ok": True, "config": config_get_all()})
 
 
 @app.route("/thumb/<game_mode>/<save_name>")

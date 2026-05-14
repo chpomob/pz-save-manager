@@ -40,5 +40,12 @@ def get_app_dir(home: Path | str | None = None) -> Path:
 
 
 def get_backups_root(home: Path | str | None = None) -> Path:
-    """Return the root directory containing all backups."""
+    """Return the root directory containing all backups.
+
+    Respects the configured custom backup directory if set.
+    """
+    from .config import get_backups_dir
+    custom = get_backups_dir()
+    if custom is not None:
+        return custom
     return get_app_dir(home) / BACKUPS_DIR_NAME
