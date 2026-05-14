@@ -143,4 +143,11 @@ def gui_command(host: str, port: int, no_browser: bool) -> None:
         run_gui(host, port)
 
 
+@main.command("install")
+def install_command() -> None:
+    """Create desktop shortcuts and launchers."""
+    from .installer import install
+    install()
+
+
 main.add_command(list_saves_command, "list-saves")
