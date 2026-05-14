@@ -79,6 +79,7 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 <div class="container">
 <h2>📁 Saves ({{saves|length}})</h2>
 {% if not saves %}<div class="empty">No saves found. Launch Project Zomboid!</div>{% endif %}
+<div class="grid">
 {% for save in saves %}
 <div class="card" id="save-{{loop.index}}">
 <div class="card-header" onclick="this.parentElement.classList.toggle('open')">
