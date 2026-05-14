@@ -134,11 +134,12 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 <div class="name" title="{{b.timestamp}}">{{b.timestamp}}</div>
 <div class="sub">{{b.age}} · {{b.size}} · {{b.files}} fichiers{% if b.auto %} · 🤖 auto{% else %} · ✋ manuel{% endif %}</div>
 </div>
-<div class="status-dot {% if b.auto %}status-alive{% else %}status-unknown{% endif %}"></div>
+<div class="status-dot {% if b.player_dead is none %}status-unknown{% elif b.player_dead %}status-dead{% else %}status-alive{% endif %}"></div>
 <span class="arrow">▾</span>
 </div>
 <div class="card-body">
 <div class="detail-grid">
+<div class="detail-item"><strong>Status</strong> {% if b.player_dead is none %}Unknown{% elif b.player_dead %}💀 Dead{% else %}🟢 Alive{% endif %}</div>
 <div class="detail-item"><strong>Timestamp</strong> {{b.timestamp}}</div>
 <div class="detail-item"><strong>Age</strong> {{b.age}}</div>
 <div class="detail-item"><strong>Size</strong> {{b.size}}</div>
@@ -228,12 +229,16 @@ def index():
     saves = list_saves()
     save_infos = [_save_info(s, manager) for s in saves]
     all_backups = list_backups()
-    all_b = [{
-        "game_mode": b.game_mode, "save_name": b.save_name,
-        "timestamp": b.timestamp, "auto": b.auto,
-        "size": f"{b.size_mb} MB", "files": b.file_count, "age": b.age,
-        "has_thumbnail": (b.path / "thumb.png").is_file(),
-    } for b in all_backups]
+    all_b = []
+    for b in all_backups:
+        pi = extract_all(b.path)
+        all_b.append({
+            "game_mode": b.game_mode, "save_name": b.save_name,
+            "timestamp": b.timestamp, "auto": b.auto,
+            "size": f"{b.size_mb} MB", "files": b.file_count, "age": b.age,
+            "has_thumbnail": (b.path / "thumb.png").is_file(),
+            "player_dead": pi.get("player_dead"),
+        })
     return render_template_string(PAGE, saves=save_infos, all_backups=all_b, watcher_running=manager.running)
 
 
