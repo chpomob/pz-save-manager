@@ -7,10 +7,11 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, jsonify, render_template_string, request, send_file
 
 from .backup import BackupError, BackupNotFound, create_backup, delete_backup, list_backups, restore_backup
 from .platforms import get_backups_root, get_saves_root
+from .save_info import extract_all
 from .saves import SaveGame, SaveNotFound, get_save_modified_time, list_saves
 from .watcher import WatcherManager, get_manager
 
@@ -80,11 +81,18 @@ h2{font-size:1.1rem;margin-bottom:1rem;color:var(--muted);text-transform:upperca
   <div class="grid">
   {% for save in saves %}
   <div class="card" id="save-{{loop.index}}">
+    {% if save.has_thumbnail %}
+    <img src="/thumb/{{save.game_mode}}/{{save.name}}" style="width:100%;height:140px;object-fit:cover;border-radius:6px;margin-bottom:.5rem" loading="lazy">
+    {% endif %}
     <h3>{{save.name}}</h3>
     <div class="mode">{{save.game_mode}}</div>
     <div class="meta">
       Modified: {{save.modified}}<br>
       Files: {{save.file_count}} &middot; {{save.size_mb}} MB
+      {% if save.vehicles is not none %}<br>🚗 {{save.vehicles}} vehicles{% endif %}
+      {% if save.players is not none %}<br>👤 {{save.players}} players{% endif %}
+      {% if save.items %}<br>📦 {{save.items}} items{% endif %}
+      {% if save.map_pos %}<br>🗺️ {{save.map_pos}}{% endif %}
     </div>
     <div class="actions">
       <button class="btn btn-accent" onclick="backup('{{save.game_mode}}','{{save.name}}',this)">💾 Backup now</button>
@@ -148,13 +156,15 @@ def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
         total_size = 0
     modified = datetime.fromtimestamp(get_save_modified_time(save)).strftime("%Y-%m-%d %H:%M:%S")
     backups = list_backups(save.game_mode, save.name)
-    return {
+    extra = extract_all(path)
+    info = {
         "game_mode": save.game_mode,
         "name": save.name,
         "path": str(save.path),
         "modified": modified,
         "file_count": file_count,
         "size_mb": round(total_size / (1024 * 1024), 1),
+        "has_thumbnail": extra.get("has_thumbnail", False),
         "backups": [{
             "game_mode": b.game_mode, "save_name": b.save_name,
             "timestamp": b.timestamp, "auto": b.auto,
@@ -162,6 +172,15 @@ def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
         } for b in backups[:5]],
         "watched": save.display_name in manager.watched_saves(),
     }
+    if "vehicles" in extra:
+        info["vehicles"] = extra["vehicles"]
+    if "players" in extra:
+        info["players"] = extra["players"]
+    if "items_total" in extra:
+        info["items"] = f"{extra['items_total']} ({extra.get('items_modded',0)} mods)"
+    if "map_x" in extra:
+        info["map_pos"] = f"({extra['map_x']}, {extra['map_y']})"
+    return info
 
 
 # ---- Routes ----
@@ -236,6 +255,20 @@ def api_watcher_save():
         if not manager.running:
             manager.start()
         return jsonify({"ok": True, "message": f"Watching {save.name}"})
+
+
+@app.route("/thumb/<game_mode>/<save_name>")
+def serve_thumbnail(game_mode: str, save_name: str):
+    """Serve the save's thumb.png."""
+    from .saves import get_save
+    try:
+        save = get_save(game_mode, save_name)
+        thumb = save.path / "thumb.png"
+        if thumb.is_file():
+            return send_file(thumb, mimetype="image/png")
+    except Exception:
+        pass
+    return "", 404
 
 
 def run_gui(host: str = "127.0.0.1", port: int = 8080) -> None:
