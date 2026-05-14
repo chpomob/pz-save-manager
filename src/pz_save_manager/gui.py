@@ -120,26 +120,29 @@ h2{font-size:1rem;margin-bottom:.8rem;color:var(--muted);text-transform:uppercas
 {% set key = b.game_mode + '/' + b.save_name %}
 {% if key != ns.current %}
 {% set ns.current = key %}
-<h3 style="font-size:.9rem;color:var(--accent);margin:1rem 0 .4rem;padding:0">▸ {{b.game_mode}} / {{b.save_name[:30]}}</h3>
+<h3 style="font-size:.85rem;color:var(--accent);margin:1.2rem 0 .4rem;padding:0">▸ {{b.game_mode}} / {{b.save_name[:28]}}</h3>
 {% endif %}
-<div class="card" style="margin-bottom:.3rem">
-<div class="card-header" style="padding:.5rem .8rem" onclick="this.parentElement.classList.toggle('open')">
-<div class="info" style="flex:1">
-<div class="name" style="font-size:.8rem" title="{{b.timestamp}}">{{b.timestamp}}{% if b.auto %} · 🤖 auto{% endif %}</div>
-<div class="sub" style="font-size:.68rem">{{b.age}} · {{b.size}} · {{b.files}} fichiers</div>
+<div class="card">
+<div class="card-header" onclick="this.parentElement.classList.toggle('open')">
+<div class="info">
+<div class="name" title="{{b.timestamp}}">{{b.timestamp}}</div>
+<div class="sub">{{b.age}} · {{b.size}} · {{b.files}} fichiers{% if b.auto %} · 🤖 auto{% else %} · ✋ manuel{% endif %}</div>
 </div>
-<span class="arrow" style="font-size:1rem">▾</span>
+<div class="status-dot {% if b.auto %}status-alive{% else %}status-unknown{% endif %}"></div>
+<span class="arrow">▾</span>
 </div>
-<div class="card-body" style="padding:.5rem .8rem">
+<div class="card-body">
 <div class="detail-grid">
 <div class="detail-item"><strong>Timestamp</strong> {{b.timestamp}}</div>
 <div class="detail-item"><strong>Age</strong> {{b.age}}</div>
 <div class="detail-item"><strong>Size</strong> {{b.size}}</div>
 <div class="detail-item"><strong>Files</strong> {{b.files}}</div>
-<div class="detail-item"><strong>Type</strong> {% if b.auto %}Automatic{% else %}Manual{% endif %}</div>
+<div class="detail-item"><strong>Type</strong> {% if b.auto %}🤖 Automatic{% else %}✋ Manual{% endif %}</div>
 <div class="detail-item"><strong>Save</strong> {{b.game_mode}} / {{b.save_name[:30]}}</div>
 </div>
-<button class="btn btn-green btn-sm" onclick="event.stopPropagation();restore('{{b.game_mode}}','{{b.save_name}}','{{b.timestamp}}',this)">↩ Restore this version</button>
+<div class="actions">
+<button class="btn btn-green" onclick="event.stopPropagation();restore('{{b.game_mode}}','{{b.save_name}}','{{b.timestamp}}',this)">↩ Restore this version</button>
+</div>
 </div>
 </div>
 {% endfor %}
