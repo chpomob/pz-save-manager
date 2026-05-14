@@ -23,22 +23,13 @@ clean web interface.
 
 ## Screenshots
 
-```
-┌──────────────────────────────────────────────────────┐
-│  🧟 PZ Save Manager    Watcher: RUNNING  [Stop] ⚙ ✕ │
-├──────────────────────────────────────────────────────┤
-│  📁 Saves (2)                                        │
-│  ┌──────────────────────────────────────────────┐    │
-│  │ [thumb] Miriam Hyde · 2026-05-14_16-12-25     │    │
-│  │ APOCALYPSE · Rosewood, KY · 38 MB    🟢      │    │
-│  │ ▸ Backups: 3 min ago · 45 MB · 🤖 auto  [↩] │    │
-│  └──────────────────────────────────────────────┘    │
-│  ┌──────────────────────────────────────────────┐    │
-│  │ [thumb] 149.202.88.99_...                     │    │
-│  │ MULTIPLAYER · 187 files · 45 MB      🟡      │    │
-│  └──────────────────────────────────────────────┘    │
-└──────────────────────────────────────────────────────┘
-```
+![Dashboard](docs/screenshot-dashboard.png)
+
+*Compact cards with status indicator, thumbnail, and one-click actions.*
+
+![Detail view](docs/screenshot-detail.png)
+
+*Expanded view showing player info, stats, backup history, and restore options.*
 
 ## Quick Start
 
