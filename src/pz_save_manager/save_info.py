@@ -17,6 +17,85 @@ def has_thumbnail(save_path: Path) -> bool:
     return (save_path / "thumb.png").is_file()
 
 
+# ---- mods.txt ----
+
+def parse_mods(save_path: Path) -> list[str] | None:
+    """Return list of active mod IDs, or None."""
+    path = save_path / "mods.txt"
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    # Extract quoted mod names from mods {} block
+    mods = re.findall(r'"([^"]+)"', text)
+    return mods if mods else []
+
+
+# ---- map name (map_ver.bin) ----
+
+def map_name(save_path: Path) -> str | None:
+    """Extract visible map name from map_ver.bin (e.g. 'Rosewood, KY')."""
+    path = save_path / "map_ver.bin"
+    if not path.is_file():
+        return None
+    try:
+        data = path.read_bytes()
+        # The format is: 4 bytes version, 4 bytes flags, then UTF-16LE strings
+        # Look for the readable part (starts after ~8 bytes, UTF-16LE encoded)
+        # Decode from offset 8 as UTF-16LE, grab first null-terminated string
+        if len(data) > 12:
+            # Try parsing as UTF-16LE from byte 8
+            raw = data[8:]
+            try:
+                decoded = raw.decode("utf-16-le", errors="ignore")
+                # Take first line / null-terminated part
+                name = decoded.split("\x00")[0].strip()
+                if name and len(name) > 2 and len(name) < 100:
+                    return name
+            except Exception:
+                pass
+            # Fallback: extract ASCII-readable chars
+            readable = "".join(chr(b) for b in raw if 32 <= b < 127)
+            if readable and len(readable) > 2:
+                return readable[:80]
+    except Exception:
+        pass
+    return None
+
+
+# ---- player name (players.db) ----
+
+def player_name(save_path: Path) -> str | None:
+    """Return local player name, or None."""
+    path = save_path / "players.db"
+    if not path.is_file():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        cur = conn.execute("SELECT username FROM localPlayers LIMIT 1")
+        row = cur.fetchone()
+        conn.close()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
+# ---- WorldDictionaryLog.lua (crafted objects) ----
+
+def crafted_objects(save_path: Path) -> int | None:
+    """Count crafted/built objects from WorldDictionaryLog.lua."""
+    path = save_path / "WorldDictionaryLog.lua"
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return len(re.findall(r"registeryID\s*=", text))
+
+
 # ---- WorldDictionaryReadable.lua ----
 
 def parse_world_dictionary(save_path: Path) -> dict | None:
@@ -116,6 +195,23 @@ def extract_all(save_path: Path) -> dict:
     """Return all safely-extractable metadata for a save directory."""
     info: dict = {}
     info["has_thumbnail"] = has_thumbnail(save_path)
+
+    mn = map_name(save_path)
+    if mn:
+        info["map_name"] = mn
+
+    pn = player_name(save_path)
+    if pn:
+        info["player"] = pn
+
+    mods = parse_mods(save_path)
+    if mods is not None:
+        info["mods"] = mods
+        info["mod_count"] = len(mods)
+
+    crafted = crafted_objects(save_path)
+    if crafted is not None:
+        info["crafted"] = crafted
 
     wd = parse_world_dictionary(save_path)
     if wd:

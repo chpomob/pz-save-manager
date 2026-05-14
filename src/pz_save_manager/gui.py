@@ -85,12 +85,15 @@ h2{font-size:1.1rem;margin-bottom:1rem;color:var(--muted);text-transform:upperca
     <img src="/thumb/{{save.game_mode}}/{{save.name}}" style="width:100%;height:140px;object-fit:cover;border-radius:6px;margin-bottom:.5rem" loading="lazy">
     {% endif %}
     <h3>{{save.name}}</h3>
-    <div class="mode">{{save.game_mode}}</div>
+    <div class="mode">{{save.game_mode}}{% if save.map_name %} · {{save.map_name}}{% endif %}</div>
     <div class="meta">
       Modified: {{save.modified}}<br>
       Files: {{save.file_count}} &middot; {{save.size_mb}} MB
+      {% if save.player %}<br>👤 {{save.player}}{% endif %}
       {% if save.vehicles is not none %}<br>🚗 {{save.vehicles}} vehicles{% endif %}
-      {% if save.players is not none %}<br>👤 {{save.players}} players{% endif %}
+      {% if save.players is not none %}<br>👥 {{save.players}} players{% endif %}
+      {% if save.crafted is not none %}<br>🔨 {{save.crafted}} objects crafted{% endif %}
+      {% if save.mod_count %}<br>🧩 {{save.mod_count}} mods{% endif %}
       {% if save.items %}<br>📦 {{save.items}} items{% endif %}
       {% if save.map_pos %}<br>🗺️ {{save.map_pos}}{% endif %}
     </div>
@@ -180,6 +183,14 @@ def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
         info["items"] = f"{extra['items_total']} ({extra.get('items_modded',0)} mods)"
     if "map_x" in extra:
         info["map_pos"] = f"({extra['map_x']}, {extra['map_y']})"
+    if "map_name" in extra:
+        info["map_name"] = extra["map_name"]
+    if "player" in extra:
+        info["player"] = extra["player"]
+    if "mod_count" in extra:
+        info["mod_count"] = extra["mod_count"]
+    if "crafted" in extra:
+        info["crafted"] = extra["crafted"]
     return info
 
 
