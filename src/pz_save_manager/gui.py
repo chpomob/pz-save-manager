@@ -112,8 +112,9 @@ h2{font-size:1rem;margin-bottom:.8rem;color:var(--muted);text-transform:uppercas
 <div style="font-size:.8rem;color:var(--muted);margin-bottom:.3rem">Backups:</div>
 {% if save.backups %}
 {% for b in save.backups[:5] %}
-<div class="backup-item">
-<span class="ts">{{b.age}} · {{b.size}} {% if b.auto %}🤖{% endif %}</span>
+<div class="backup-item" title="{{b.timestamp}} · {{b.size}} · {{b.files}} files{% if b.auto %} · auto{% endif %}">
+<span class="ts">{{b.age}}</span>
+<span style="font-size:.72rem;color:var(--muted)">{{b.size}} · {{b.files}}f {% if b.auto %}🤖{% endif %}</span>
 <span style="flex:1"></span>
 <button class="btn btn-sm btn-green" onclick="event.stopPropagation();restore('{{b.game_mode}}','{{b.save_name}}','{{b.timestamp}}',this)">↩</button>
 </div>
@@ -122,6 +123,21 @@ h2{font-size:1rem;margin-bottom:.8rem;color:var(--muted);text-transform:uppercas
 <div class="backup-item"><span style="color:var(--muted)">None yet</span></div>
 {% endif %}
 </div>
+</div>
+</div>
+{% endfor %}
+</div>
+<h2 style="margin-top:2rem">📋 All Backups ({{all_backups|length}})</h2>
+{% if not all_backups %}<div class="empty">No backups yet.</div>{% endif %}
+<div class="grid">
+{% for b in all_backups[:30] %}
+<div class="card" style="padding:.8rem 1rem">
+<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.3rem">
+<div>
+<div style="font-weight:600;font-size:.85rem">{{b.save_name[:30]}}</div>
+<div style="font-size:.72rem;color:var(--muted)">{{b.game_mode}} · {{b.timestamp}} · {{b.age}} · {{b.size}} · {{b.files}}f {% if b.auto %}🤖 auto{% endif %}</div>
+</div>
+<button class="btn btn-sm btn-green" onclick="restore('{{b.game_mode}}','{{b.save_name}}','{{b.timestamp}}',this)">↩ Restore</button>
 </div>
 </div>
 {% endfor %}
@@ -198,7 +214,13 @@ def index():
     manager = get_manager()
     saves = list_saves()
     save_infos = [_save_info(s, manager) for s in saves]
-    return render_template_string(PAGE, saves=save_infos, watcher_running=manager.running)
+    all_backups = list_backups()
+    all_b = [{
+        "game_mode": b.game_mode, "save_name": b.save_name,
+        "timestamp": b.timestamp, "auto": b.auto,
+        "size": f"{b.size_mb} MB", "files": b.file_count, "age": b.age,
+    } for b in all_backups]
+    return render_template_string(PAGE, saves=save_infos, all_backups=all_b, watcher_running=manager.running)
 
 
 @app.route("/api/backup", methods=["POST"])
