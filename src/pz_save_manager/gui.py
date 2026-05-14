@@ -7,7 +7,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, render_template_string, request, send_file
 
-from .backup import BackupError, BackupNotFound, create_backup, list_backups, restore_backup
+from .backup import BackupError, BackupNotFound, create_backup, delete_backup, list_backups, restore_backup
 from .config import get_all as config_get_all, set_ as config_set
 from .platforms import get_backups_root, get_saves_root
 from .save_info import extract_all
@@ -141,7 +141,8 @@ h2{font-size:1rem;margin-bottom:.8rem;color:var(--muted);text-transform:uppercas
 <div class="detail-item"><strong>Save</strong> {{b.game_mode}} / {{b.save_name[:30]}}</div>
 </div>
 <div class="actions">
-<button class="btn btn-green" onclick="event.stopPropagation();restore('{{b.game_mode}}','{{b.save_name}}','{{b.timestamp}}',this)">↩ Restore this version</button>
+<button class="btn btn-green" onclick="event.stopPropagation();restore('{{b.game_mode}}','{{b.save_name}}','{{b.timestamp}}',this)">↩ Restore</button>
+<button class="btn btn-red btn-sm" onclick="event.stopPropagation();deleteBackup('{{b.game_mode}}','{{b.save_name}}','{{b.timestamp}}',this)">🗑 Delete</button>
 </div>
 </div>
 </div>
@@ -169,7 +170,8 @@ function toggleWatcher(){api('POST','/api/watcher/toggle').then(r=>r.json()).the
 function toggleWatch(m,n,b){b.disabled=true;api('POST','/api/watcher/save',{game_mode:m,save_name:n}).then(r=>r.json()).then(d=>{toast(d.message);location.reload()})}
 function toggleSettings(){var o=document.getElementById('settings-overlay');if(o.style.display==='flex'){o.style.display='none'}else{o.style.display='flex';api('GET','/api/config').then(r=>r.json()).then(d=>{document.getElementById('cfg-backups-dir').value=d.backups_dir||'';document.getElementById('cfg-debounce').value=d.debounce_seconds})}}
 function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,debounce_seconds:document.getElementById('cfg-debounce').value};api('POST','/api/config',data).then(r=>r.json()).then(d=>{d.ok?toast('Settings saved! Reloading...'):toast('Error','var(--red)');setTimeout(function(){location.reload()},1000)})}
-function shutdown(){if(confirm('Close PZ Save Manager?')){api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style=\"text-align:center;padding:4rem;color:var(--muted)\"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'})}}
+function shutdown(){if(confirm('Close PZ Save Manager?')){api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style=\\\"text-align:center;padding:4rem;color:var(--muted)\\\"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'})}}
+function deleteBackup(m,n,t,b){if(!confirm('Delete backup '+t+'?'))return;b.disabled=true;api('POST','/api/backup/delete',{game_mode:m,save_name:n,timestamp:t}).then(r=>r.json()).then(d=>{d.ok?toast('Deleted!')&&setTimeout(function(){location.reload()},800):toast(d.error,'var(--red)')})}
 </script>
 </body>
 </html>"""
@@ -243,6 +245,16 @@ def api_restore():
     try:
         restore_backup(data["game_mode"], data["save_name"], data["timestamp"])
         return jsonify({"ok": True})
+    except (BackupNotFound, BackupError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/backup/delete", methods=["POST"])
+def api_delete_backup():
+    data = request.get_json()
+    try:
+        delete_backup(data["game_mode"], data["save_name"], data["timestamp"])
+        return jsonify({"ok": True, "message": "Backup deleted"})
     except (BackupNotFound, BackupError) as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
