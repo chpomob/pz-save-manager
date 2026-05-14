@@ -72,6 +72,7 @@ h2{font-size:1rem;margin-bottom:.8rem;color:var(--muted);text-transform:uppercas
 <span>Watcher: <span class="badge {{'on' if watcher_running else 'off'}}">{{'RUNNING' if watcher_running else 'STOPPED'}}</span></span>
 <button class="btn btn-sm {{'btn-red' if watcher_running else 'btn-green'}}" onclick="toggleWatcher()">{{'Stop' if watcher_running else 'Start'}} Watcher</button>
 <button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick="toggleSettings()">⚙</button>
+<button class="btn btn-sm btn-red" onclick="shutdown()" title="Close app">✕</button>
 </div>
 </header>
 <div class="container">
@@ -98,7 +99,7 @@ h2{font-size:1rem;margin-bottom:.8rem;color:var(--muted);text-transform:uppercas
 <div class="detail-item"><strong>Size</strong> {{save.size_mb}} MB</div>
 <div class="detail-item"><strong>Modified</strong> {{save.modified}}</div>
 {% if save.vehicles is not none %}<div class="detail-item"><strong>Vehicles</strong> {{save.vehicles}}</div>{% endif %}
-{% if save.crafted is not none %}<div class="detail-item"><strong>Crafted</strong> {{save.crafted}} objects</div>{% endif %}
+{% if save.chunks is not none %}<div class="detail-item"><strong>Chunks loaded</strong> {{save.chunks}}</div>{% endif %}
 {% if save.mod_count %}<div class="detail-item"><strong>Mods</strong> {{save.mod_count}}{% endif %}
 {% if save.items %}<div class="detail-item"><strong>Items</strong> {{save.items}}</div>{% endif %}
 {% if save.players %}<div class="detail-item"><strong>Players</strong> {{save.players}}</div>{% endif %}
@@ -148,6 +149,7 @@ function toggleWatcher(){api('POST','/api/watcher/toggle').then(r=>r.json()).the
 function toggleWatch(m,n,b){b.disabled=true;api('POST','/api/watcher/save',{game_mode:m,save_name:n}).then(r=>r.json()).then(d=>{toast(d.message);location.reload()})}
 function toggleSettings(){var o=document.getElementById('settings-overlay');if(o.style.display==='flex'){o.style.display='none'}else{o.style.display='flex';api('GET','/api/config').then(r=>r.json()).then(d=>{document.getElementById('cfg-backups-dir').value=d.backups_dir||'';document.getElementById('cfg-debounce').value=d.debounce_seconds})}}
 function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,debounce_seconds:document.getElementById('cfg-debounce').value};api('POST','/api/config',data).then(r=>r.json()).then(d=>{d.ok?toast('Settings saved! Reloading...'):toast('Error','var(--red)');setTimeout(function(){location.reload()},1000)})}
+function shutdown(){if(confirm('Close PZ Save Manager?')){api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style=\"text-align:center;padding:4rem;color:var(--muted)\"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'})}}
 </script>
 </body>
 </html>"""
@@ -175,10 +177,17 @@ def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
         } for b in backups[:5]],
         "watched": save.display_name in manager.watched_saves(),
     }
-    for k in ("vehicles", "players", "items", "map_pos", "map_name", "mod_count", "crafted",
+    for k in ("vehicles", "players", "items", "map_pos", "map_name", "mod_count",
               "player", "player_dead", "player_x", "player_y", "player_world_version"):
         if k in extra:
             info[k] = extra[k]
+    # Count map chunks loaded
+    map_dir = save.path / "map"
+    if map_dir.is_dir():
+        try:
+            info["chunks"] = sum(1 for _ in map_dir.glob("*.bin"))
+        except OSError:
+            pass
     return info
 
 
@@ -267,6 +276,22 @@ def serve_thumbnail(game_mode: str, save_name: str):
     except Exception:
         pass
     return "", 404
+
+
+@app.route("/api/shutdown", methods=["POST"])
+def api_shutdown():
+    """Gracefully stop the server."""
+    manager = get_manager()
+    if manager.running:
+        manager.stop()
+
+    def shutdown_server():
+        import os
+        os._exit(0)
+
+    from threading import Timer
+    Timer(0.5, shutdown_server).start()
+    return jsonify({"ok": True, "message": "Shutting down..."})
 
 
 def run_gui(host: str = "127.0.0.1", port: int = 8080) -> None:
