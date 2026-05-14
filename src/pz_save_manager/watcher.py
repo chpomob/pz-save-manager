@@ -66,6 +66,13 @@ class WatcherManager:
 
     def start(self) -> None:
         if not self._running:
+            if not self._observer.is_alive():
+                self._observer = Observer()
+                # Re-schedule all watched saves
+                for key, watcher in list(self._watchers.items()):
+                    save = watcher.save
+                    handle = self._observer.schedule(watcher, str(save.path), recursive=True)
+                    self._watches[key] = handle
             self._observer.start()
             self._running = True
 
