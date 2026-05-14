@@ -36,10 +36,10 @@ h2{font-size:1rem;margin-bottom:.8rem;color:var(--muted);text-transform:uppercas
 .card{background:var(--card);border-radius:var(--radius);border:1px solid rgba(255,255,255,.05);margin-bottom:.7rem;overflow:hidden;transition:border .15s}
 .card:hover{border-color:rgba(255,255,255,.15)}
 .card-header{display:flex;align-items:center;padding:.8rem 1rem;cursor:pointer;gap:.8rem;user-select:none}
-.card-header .thumb{width:72px;height:54px;border-radius:6px;object-fit:cover;flex-shrink:0;background:var(--accent2)}
-.card-header .info{flex:1;min-width:0}
-.card-header .info .name{font-weight:600;font-size:.95rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.card-header .info .sub{font-size:.78rem;color:var(--muted);margin-top:2px}
+.card-header .thumb{width:56px;height:42px;border-radius:5px;object-fit:cover;flex-shrink:0;background:var(--accent2)}
+.card-header .info{flex:1;min-width:0;overflow:hidden}
+.card-header .info .name{font-weight:600;font-size:.9rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card-header .info .sub{font-size:.72rem;color:var(--muted);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .card-header .status-dot{width:12px;height:12px;border-radius:50%;flex-shrink:0}
 .status-alive{background:var(--green);box-shadow:0 0 8px var(--green)}
 .status-dead{background:var(--dead)}
@@ -81,10 +81,10 @@ h2{font-size:1rem;margin-bottom:.8rem;color:var(--muted);text-transform:uppercas
 {% for save in saves %}
 <div class="card" id="save-{{loop.index}}">
 <div class="card-header" onclick="this.parentElement.classList.toggle('open')">
-{% if save.has_thumbnail %}<img src="/thumb/{{save.game_mode}}/{{save.name}}" class="thumb" loading="lazy">{% else %}<div class="thumb"></div>{% endif %}
+{% if save.has_thumbnail %}<img src="/thumb/{{save.game_mode}}/{{save.full_name}}" class="thumb" loading="lazy">{% else %}<div class="thumb"></div>{% endif %}
 <div class="info">
-<div class="name">{% if save.player %}{{save.player}} · {% endif %}{{save.name}}</div>
-<div class="sub">{{save.game_mode}}{% if save.map_name %} · {{save.map_name}}{% endif %} · {{save.modified}}{% if save.size_mb %} · {{save.size_mb}} MB{% endif %}</div>
+<div class="name" title="{{save.full_name}}">{% if save.player %}{{save.player}} · {% endif %}{{save.name}}</div>
+<div class="sub">{{save.game_mode}}{% if save.map_name %} · {{save.map_name}}{% endif %} · {{save.modified}}</div>
 </div>
 <div class="status-dot {% if save.player_dead is none %}status-unknown{% elif save.player_dead %}status-dead{% else %}status-alive{% endif %}" title="{% if save.player_dead is none %}Unknown{% elif save.player_dead %}Dead{% else %}Alive{% endif %}"></div>
 <span class="arrow">▾</span>
@@ -105,15 +105,15 @@ h2{font-size:1rem;margin-bottom:.8rem;color:var(--muted);text-transform:uppercas
 {% if save.players %}<div class="detail-item"><strong>Players</strong> {{save.players}}</div>{% endif %}
 </div>
 <div class="actions">
-<button class="btn btn-accent" onclick="event.stopPropagation();backup('{{save.game_mode}}','{{save.name}}',this)">💾 Backup</button>
-<button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick="event.stopPropagation();toggleWatch('{{save.game_mode}}','{{save.name}}',this)">{{'⏸ Unwatch' if save.watched else '👁 Watch'}}</button>
+<button class="btn btn-accent" onclick="event.stopPropagation();backup('{{save.game_mode}}','{{save.full_name}}',this)">💾 Backup</button>
+<button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick="event.stopPropagation();toggleWatch('{{save.game_mode}}','{{save.full_name}}',this)">{{'⏸ Unwatch' if save.watched else '👁 Watch'}}</button>
 </div>
 <div class="backup-list">
 <div style="font-size:.8rem;color:var(--muted);margin-bottom:.3rem">Backups:</div>
 {% if save.backups %}
 {% for b in save.backups[:5] %}
 <div class="backup-item">
-<span class="ts">{{b.age}} · {{b.size}} · {{b.files}} files {% if b.auto %}🤖{% endif %}</span>
+<span class="ts">{{b.age}} · {{b.size}} {% if b.auto %}🤖{% endif %}</span>
 <span style="flex:1"></span>
 <button class="btn btn-sm btn-green" onclick="event.stopPropagation();restore('{{b.game_mode}}','{{b.save_name}}','{{b.timestamp}}',this)">↩</button>
 </div>
@@ -157,6 +157,8 @@ function shutdown(){if(confirm('Close PZ Save Manager?')){api('POST','/api/shutd
 
 def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
     path = save.path
+    # Truncate display name for compact view
+    short_name = save.name if len(save.name) <= 32 else save.name[:29] + "..."
     try:
         file_count = sum(1 for _ in path.rglob("*") if _.is_file())
         total_size = sum(_.stat().st_size for _ in path.rglob("*") if _.is_file())
@@ -167,7 +169,7 @@ def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
     backups = list_backups(save.game_mode, save.name)
     extra = extract_all(path)
     info = {
-        "game_mode": save.game_mode, "name": save.name,
+        "game_mode": save.game_mode, "name": short_name, "full_name": save.name,
         "modified": modified, "file_count": file_count,
         "size_mb": round(total_size / (1024 * 1024), 1),
         "has_thumbnail": extra.get("has_thumbnail", False),
