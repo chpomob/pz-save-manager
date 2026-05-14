@@ -124,6 +124,7 @@ h2{font-size:1rem;margin-bottom:.8rem;color:var(--muted);text-transform:uppercas
 {% endif %}
 <div class="card">
 <div class="card-header" onclick="this.parentElement.classList.toggle('open')">
+{% if b.has_thumbnail %}<img src="/thumb-backup/{{b.game_mode}}/{{b.save_name}}/{{b.timestamp}}" class="thumb" loading="lazy">{% else %}<div class="thumb"></div>{% endif %}
 <div class="info">
 <div class="name" title="{{b.timestamp}}">{{b.timestamp}}</div>
 <div class="sub">{{b.age}} · {{b.size}} · {{b.files}} fichiers{% if b.auto %} · 🤖 auto{% else %} · ✋ manuel{% endif %}</div>
@@ -225,6 +226,7 @@ def index():
         "game_mode": b.game_mode, "save_name": b.save_name,
         "timestamp": b.timestamp, "auto": b.auto,
         "size": f"{b.size_mb} MB", "files": b.file_count, "age": b.age,
+        "has_thumbnail": (b.path / "thumb.png").is_file(),
     } for b in all_backups]
     return render_template_string(PAGE, saves=save_infos, all_backups=all_b, watcher_running=manager.running)
 
@@ -303,6 +305,19 @@ def api_config():
             value = float(value) if "." in str(value) else int(value)
         config_set(key, value)
     return jsonify({"ok": True, "config": config_get_all()})
+
+
+@app.route("/thumb-backup/<game_mode>/<save_name>/<timestamp>")
+def serve_backup_thumbnail(game_mode: str, save_name: str, timestamp: str):
+    from .backup import get_backup
+    try:
+        backup = get_backup(game_mode, save_name, timestamp)
+        thumb = backup.path / "thumb.png"
+        if thumb.is_file():
+            return send_file(thumb, mimetype="image/png")
+    except Exception:
+        pass
+    return "", 404
 
 
 @app.route("/thumb/<game_mode>/<save_name>")
