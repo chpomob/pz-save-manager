@@ -35,11 +35,11 @@ h2{font-size:1rem;margin-bottom:.8rem;color:var(--muted);text-transform:uppercas
 /* Compact card */
 .card{background:var(--card);border-radius:var(--radius);border:1px solid rgba(255,255,255,.05);margin-bottom:.7rem;overflow:hidden;transition:border .15s}
 .card:hover{border-color:rgba(255,255,255,.15)}
-.card-header{display:flex;align-items:center;padding:.8rem 1rem;cursor:pointer;gap:.8rem;user-select:none}
-.card-header .thumb{width:56px;height:42px;border-radius:5px;object-fit:cover;flex-shrink:0;background:var(--accent2)}
-.card-header .info{flex:1;min-width:0;overflow:hidden}
-.card-header .info .name{font-weight:600;font-size:.9rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.card-header .info .sub{font-size:.72rem;color:var(--muted);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card-header{display:flex;align-items:center;padding:.7rem .9rem;cursor:pointer;gap:.6rem;user-select:none;overflow:hidden}
+.card-header .thumb{width:48px;height:36px;border-radius:4px;object-fit:cover;flex-shrink:0;background:var(--accent2)}
+.card-header .info{flex:1 1 0;min-width:0;overflow:hidden}
+.card-header .info .name{font-weight:600;font-size:.85rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;display:block}
+.card-header .info .sub{font-size:.7rem;color:var(--muted);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;display:block}
 .card-header .status-dot{width:12px;height:12px;border-radius:50%;flex-shrink:0}
 .status-alive{background:var(--green);box-shadow:0 0 8px var(--green)}
 .status-dead{background:var(--dead)}
@@ -84,7 +84,7 @@ h2{font-size:1rem;margin-bottom:.8rem;color:var(--muted);text-transform:uppercas
 {% if save.has_thumbnail %}<img src="/thumb/{{save.game_mode}}/{{save.full_name}}" class="thumb" loading="lazy">{% else %}<div class="thumb"></div>{% endif %}
 <div class="info">
 <div class="name" title="{{save.full_name}}">{% if save.player %}{{save.player}} · {% endif %}{{save.name}}</div>
-<div class="sub">{{save.game_mode}}{% if save.map_name %} · {{save.map_name}}{% endif %} · {{save.modified}}</div>
+<div class="sub">{{save.game_mode}}{% if save.map_name %} · {{save.map_name[:18]}}{% endif %} · {{save.modified}}</div>
 </div>
 <div class="status-dot {% if save.player_dead is none %}status-unknown{% elif save.player_dead %}status-dead{% else %}status-alive{% endif %}" title="{% if save.player_dead is none %}Unknown{% elif save.player_dead %}Dead{% else %}Alive{% endif %}"></div>
 <span class="arrow">▾</span>
@@ -158,7 +158,7 @@ function shutdown(){if(confirm('Close PZ Save Manager?')){api('POST','/api/shutd
 def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
     path = save.path
     # Truncate display name for compact view
-    short_name = save.name if len(save.name) <= 32 else save.name[:29] + "..."
+    short_name = save.name if len(save.name) <= 24 else save.name[:21] + "..."
     try:
         file_count = sum(1 for _ in path.rglob("*") if _.is_file())
         total_size = sum(_.stat().st_size for _ in path.rglob("*") if _.is_file())
