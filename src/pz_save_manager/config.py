@@ -13,10 +13,11 @@ from .platforms import get_app_dir
 CONFIG_FILE = get_app_dir() / "config.json"
 
 DEFAULTS = {
-    "backups_dir": None,       # None = use default (~/.pz-save-manager/backups)
-    "debounce_seconds": 5.0,   # Seconds to wait before auto-backup
-    "auto_start_watcher": False,  # Start watcher on GUI launch
+    "backups_dir": None,
+    "debounce_seconds": 5.0,
+    "auto_start_watcher": False,
     "port": 8080,
+    "streamer_mode": False,
 }
 
 

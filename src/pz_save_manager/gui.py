@@ -129,7 +129,7 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 {% endif %}
 <div class="card">
 <div class="card-header" onclick="this.parentElement.classList.toggle('open')">
-{% if b.has_thumbnail %}<img src="/thumb-backup/{{b.game_mode}}/{{b.save_name}}/{{b.timestamp}}" class="thumb" loading="lazy">{% else %}<div class="thumb"></div>{% endif %}
+{% if b.has_thumbnail %}<img src="/thumb-backup/{{b.game_mode}}/{{b.real_save_name}}/{{b.timestamp}}" class="thumb" loading="lazy">{% else %}<div class="thumb"></div>{% endif %}
 <div class="info">
 <div class="name" title="{{b.timestamp}}">{{b.timestamp}}</div>
 <div class="sub">{{b.age}} · {{b.size}} · {{b.files}} fichiers{% if b.auto %} · 🤖 auto{% else %} · ✋ manuel{% endif %}</div>
@@ -148,8 +148,8 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 <div class="detail-item"><strong>Save</strong> {{b.game_mode}} / {{b.save_name[:30]}}</div>
 </div>
 <div class="actions">
-<button class="btn btn-green" onclick="event.stopPropagation();restore('{{b.game_mode}}','{{b.save_name}}','{{b.timestamp}}',this)">↩ Restore</button>
-<button class="btn btn-red btn-sm" onclick="event.stopPropagation();deleteBackup('{{b.game_mode}}','{{b.save_name}}','{{b.timestamp}}',this)">🗑 Delete</button>
+<button class="btn btn-green" onclick="event.stopPropagation();restore('{{b.game_mode}}','{{b.real_save_name}}','{{b.timestamp}}',this)">↩ Restore</button>
+<button class="btn btn-red btn-sm" onclick="event.stopPropagation();deleteBackup('{{b.game_mode}}','{{b.real_save_name}}','{{b.timestamp}}',this)">🗑 Delete</button>
 </div>
 </div>
 </div>
@@ -163,6 +163,7 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 <input id="cfg-backups-dir" style="width:100%;padding:.5rem;margin-top:.3rem;background:var(--bg);border:1px solid var(--accent2);color:var(--text);border-radius:6px" placeholder="Default: ~/.pz-save-manager/backups"></div>
 <div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted)">Auto-backup delay (seconds)</label>
 <input id="cfg-debounce" type="number" step="1" min="1" max="60" style="width:100%;padding:.5rem;margin-top:.3rem;background:var(--bg);border:1px solid var(--accent2);color:var(--text);border-radius:6px"></div>
+<div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted);display:flex;align-items:center;gap:.5rem"><input id="cfg-streamer" type="checkbox" style="accent-color:var(--accent)"> Streamer mode (hide IPs)</label></div>
 <div style="display:flex;gap:.5rem;justify-content:flex-end">
 <button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick="toggleSettings()">Cancel</button>
 <button class="btn btn-sm btn-green" onclick="saveSettings()">Save</button>
@@ -176,13 +177,19 @@ function backup(m,n,b){b.disabled=true;api('POST','/api/backup',{game_mode:m,sav
 function restore(m,n,t,b){if(!confirm('Restore '+m+'/'+n+' from '+t+'?'))return;b.disabled=true;api('POST','/api/restore',{game_mode:m,save_name:n,timestamp:t}).then(r=>r.json()).then(d=>{d.ok?toast('Restored!'):toast(d.error,'var(--red)');location.reload()})}
 function toggleWatcher(){api('POST','/api/watcher/toggle').then(r=>r.json()).then(d=>{toast(d.message);location.reload()})}
 function toggleWatch(m,n,b){b.disabled=true;api('POST','/api/watcher/save',{game_mode:m,save_name:n}).then(r=>r.json()).then(d=>{toast(d.message);location.reload()})}
-function toggleSettings(){var o=document.getElementById('settings-overlay');if(o.style.display==='flex'){o.style.display='none'}else{o.style.display='flex';api('GET','/api/config').then(r=>r.json()).then(d=>{document.getElementById('cfg-backups-dir').value=d.backups_dir||'';document.getElementById('cfg-debounce').value=d.debounce_seconds})}}
-function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,debounce_seconds:document.getElementById('cfg-debounce').value};api('POST','/api/config',data).then(r=>r.json()).then(d=>{d.ok?toast('Settings saved! Reloading...'):toast('Error','var(--red)');setTimeout(function(){location.reload()},1000)})}
+function toggleSettings(){var o=document.getElementById('settings-overlay');if(o.style.display==='flex'){o.style.display='none'}else{o.style.display='flex';api('GET','/api/config').then(r=>r.json()).then(d=>{document.getElementById('cfg-backups-dir').value=d.backups_dir||'';document.getElementById('cfg-debounce').value=d.debounce_seconds;document.getElementById('cfg-streamer').checked=d.streamer_mode})}}
+function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,debounce_seconds:document.getElementById('cfg-debounce').value,streamer_mode:document.getElementById('cfg-streamer').checked};api('POST','/api/config',data).then(r=>r.json()).then(d=>{d.ok?toast('Settings saved! Reloading...'):toast('Error','var(--red)');setTimeout(function(){location.reload()},1000)})}
 function shutdown(){if(confirm('Close PZ Save Manager?')){api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style=\\\"text-align:center;padding:4rem;color:var(--muted)\\\"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'})}}
 function deleteBackup(m,n,t,b){if(!confirm('Delete backup '+t+'?'))return;b.disabled=true;api('POST','/api/backup/delete',{game_mode:m,save_name:n,timestamp:t}).then(r=>r.json()).then(d=>{d.ok?toast('Deleted!')&&setTimeout(function(){location.reload()},800):toast(d.error,'var(--red)')})}
 </script>
 </body>
 </html>"""
+
+
+def _censor(name: str) -> str:
+    """Mask IPv4 addresses in display names."""
+    import re
+    return re.sub(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(_\d+)?', '***.***.***.***', name)
 
 
 def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
@@ -229,16 +236,22 @@ def index():
     saves = list_saves()
     save_infos = [_save_info(s, manager) for s in saves]
     all_backups = list_backups()
+    streamer = config_get_all().get("streamer_mode", False)
     all_b = []
     for b in all_backups:
         pi = extract_all(b.path)
+        display_name = _censor(b.save_name) if streamer else b.save_name
         all_b.append({
-            "game_mode": b.game_mode, "save_name": b.save_name,
+            "game_mode": b.game_mode, "save_name": display_name, "real_save_name": b.save_name,
             "timestamp": b.timestamp, "auto": b.auto,
             "size": f"{b.size_mb} MB", "files": b.file_count, "age": b.age,
             "has_thumbnail": (b.path / "thumb.png").is_file(),
             "player_dead": pi.get("player_dead"),
         })
+    # Apply censor to save display names too if streamer mode
+    if streamer:
+        for info in save_infos:
+            info["name"] = _censor(info["full_name"])[:24]
     return render_template_string(PAGE, saves=save_infos, all_backups=all_b, watcher_running=manager.running)
 
 
