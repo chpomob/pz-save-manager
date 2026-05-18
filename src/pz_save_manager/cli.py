@@ -163,15 +163,14 @@ def config_command(key: str | None, value: str | None) -> None:
         return
 
     # Convert types
-    if key in ("debounce_seconds",):
+    if key == "debounce_seconds":
         value = float(value)  # type: ignore
-    elif key in ("port", "auto_start_watcher"):
-        if value.lower() in ("true", "1", "yes"):
-            value = True  # type: ignore
-        elif value.lower() in ("false", "0", "no"):
-            value = False  # type: ignore
-        else:
-            value = int(value)  # type: ignore
+    elif key == "port":
+        value = int(value)  # type: ignore
+    elif key in ("auto_start_watcher", "streamer_mode"):
+        value = value.lower() in ("true", "1", "yes")  # type: ignore
+    elif key == "backups_dir" and value in ("", "none", "null"):
+        value = None  # type: ignore
 
     set_(key, value)
     console.print(f"[green]{key} = {value}[/green]")

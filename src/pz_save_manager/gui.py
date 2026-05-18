@@ -10,7 +10,7 @@ from flask import Flask, jsonify, render_template_string, request, send_file
 from .backup import BackupError, BackupNotFound, create_backup, delete_backup, list_backups, restore_backup
 from .config import get_all as config_get_all, set_ as config_set
 from .platforms import get_backups_root, get_saves_root
-from .save_info import extract_all
+from .save_info import extract_all, player_info
 from .saves import SaveGame, SaveNotFound, get_save_modified_time, list_saves
 from .watcher import WatcherManager, get_manager
 
@@ -168,14 +168,21 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 <script>
 function toast(m,c){var t=document.getElementById('toast');t.textContent=m;t.style.background=c||'var(--green)';t.style.display='block';setTimeout(function(){t.style.display='none'},2500)}
 function api(m,u,b){return fetch(u,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined})}
-function backup(m,n,b){b.disabled=true;api('POST','/api/backup',{game_mode:m,save_name:n}).then(r=>r.json()).then(d=>{d.ok?toast('Backup created!'):toast(d.error,'var(--red)');location.reload()})}
-function restore(m,n,t,b){if(!confirm('Restore '+m+'/'+n+' from '+t+'?'))return;b.disabled=true;api('POST','/api/restore',{game_mode:m,save_name:n,timestamp:t}).then(r=>r.json()).then(d=>{d.ok?toast('Restored!'):toast(d.error,'var(--red)');location.reload()})}
-function toggleWatcher(){api('POST','/api/watcher/toggle').then(r=>r.json()).then(d=>{toast(d.message);location.reload()})}
-function toggleWatch(m,n,b){b.disabled=true;api('POST','/api/watcher/save',{game_mode:m,save_name:n}).then(r=>r.json()).then(d=>{toast(d.message);location.reload()})}
+function doAction(b,url,body,okMsg){
+  if(b)b.disabled=true;
+  return api('POST',url,body).then(r=>r.json()).then(d=>{
+    if(d.ok){toast(okMsg||d.message||'OK');setTimeout(function(){location.reload()},600)}
+    else{toast(d.error||d.message||'Error','var(--red)');if(b)b.disabled=false}
+  }).catch(function(){toast('Network error','var(--red)');if(b)b.disabled=false})
+}
+function backup(m,n,b){doAction(b,'/api/backup',{game_mode:m,save_name:n},'Backup created!')}
+function restore(m,n,t,b){if(!confirm('Restore '+m+'/'+n+' from '+t+'?'))return;doAction(b,'/api/restore',{game_mode:m,save_name:n,timestamp:t},'Restored!')}
+function deleteBackup(m,n,t,b){if(!confirm('Delete backup '+t+'?'))return;doAction(b,'/api/backup/delete',{game_mode:m,save_name:n,timestamp:t},'Deleted!')}
+function toggleWatcher(){doAction(null,'/api/watcher/toggle',null)}
+function toggleWatch(m,n,b){doAction(b,'/api/watcher/save',{game_mode:m,save_name:n})}
 function toggleSettings(){var o=document.getElementById('settings-overlay');if(o.style.display==='flex'){o.style.display='none'}else{o.style.display='flex';api('GET','/api/config').then(r=>r.json()).then(d=>{document.getElementById('cfg-backups-dir').value=d.backups_dir||'';document.getElementById('cfg-debounce').value=d.debounce_seconds;document.getElementById('cfg-streamer').checked=d.streamer_mode})}}
-function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,debounce_seconds:document.getElementById('cfg-debounce').value,streamer_mode:document.getElementById('cfg-streamer').checked};api('POST','/api/config',data).then(r=>r.json()).then(d=>{d.ok?toast('Settings saved! Reloading...'):toast('Error','var(--red)');setTimeout(function(){location.reload()},1000)})}
-function shutdown(){if(confirm('Close PZ Save Manager?')){api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style=\\\"text-align:center;padding:4rem;color:var(--muted)\\\"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'})}}
-function deleteBackup(m,n,t,b){if(!confirm('Delete backup '+t+'?'))return;b.disabled=true;api('POST','/api/backup/delete',{game_mode:m,save_name:n,timestamp:t}).then(r=>r.json()).then(d=>{if(d.ok){toast('Deleted!');setTimeout(function(){location.reload()},800)}else{toast(d.error,'var(--red)');b.disabled=false}})}
+function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,debounce_seconds:document.getElementById('cfg-debounce').value,streamer_mode:document.getElementById('cfg-streamer').checked};doAction(null,'/api/config',data,'Settings saved!')}
+function shutdown(){if(!confirm('Close PZ Save Manager?'))return;api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style="text-align:center;padding:4rem;color:#888"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'}).catch(function(){toast('Network error','var(--red)')})}
 </script>
 </body>
 </html>"""
@@ -214,7 +221,14 @@ def index():
     try:
         manager = get_manager()
         saves = list_saves()
-        save_infos = [_save_info(s, manager) for s in saves]
+        # Per-save try/except: a single corrupt save shouldn't blank the page.
+        save_infos = []
+        for s in saves:
+            try:
+                save_infos.append(_save_info(s, manager))
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning("could not read save %s", s.display_name, exc_info=True)
         all_backups = list_backups()
         streamer = config_get_all().get("streamer_mode", False)
         all_b = []
@@ -223,7 +237,6 @@ def index():
             # O(1) versus extract_all which reads every metadata file. Backups
             # also have b.size_mb / b.file_count properties that rglob — skip
             # those in the list view, surface them lazily if/when needed.
-            from .save_info import player_info
             pi = player_info(b.path) or {}
             display_name = _censor(b.save_name) if streamer else b.save_name
             all_b.append({
@@ -312,9 +325,18 @@ def health():
     )
 
 
+def _need(data: dict | None, *keys: str):
+    """Return (data, None) if all keys present, else (None, error_response)."""
+    if not isinstance(data, dict) or not all(k in data and data[k] for k in keys):
+        return None, (jsonify({"ok": False, "error": f"Missing fields: {', '.join(keys)}"}), 400)
+    return data, None
+
+
 @app.route("/api/backup", methods=["POST"])
 def api_backup():
-    data = request.get_json()
+    data, err = _need(request.get_json(silent=True), "game_mode", "save_name")
+    if err:
+        return err
     try:
         b = create_backup(data["game_mode"], data["save_name"])
         return jsonify({"ok": True, "timestamp": b.timestamp})
@@ -324,7 +346,9 @@ def api_backup():
 
 @app.route("/api/restore", methods=["POST"])
 def api_restore():
-    data = request.get_json()
+    data, err = _need(request.get_json(silent=True), "game_mode", "save_name", "timestamp")
+    if err:
+        return err
     try:
         restore_backup(data["game_mode"], data["save_name"], data["timestamp"])
         return jsonify({"ok": True})
@@ -334,7 +358,9 @@ def api_restore():
 
 @app.route("/api/backup/delete", methods=["POST"])
 def api_delete_backup():
-    data = request.get_json()
+    data, err = _need(request.get_json(silent=True), "game_mode", "save_name", "timestamp")
+    if err:
+        return err
     try:
         delete_backup(data["game_mode"], data["save_name"], data["timestamp"])
         return jsonify({"ok": True, "message": "Backup deleted"})
@@ -357,7 +383,9 @@ def api_watcher_toggle():
 
 @app.route("/api/watcher/save", methods=["POST"])
 def api_watcher_save():
-    data = request.get_json()
+    data, err = _need(request.get_json(silent=True), "game_mode", "save_name")
+    if err:
+        return err
     from .saves import get_save
     try:
         save = get_save(data["game_mode"], data["save_name"])
@@ -378,14 +406,26 @@ def api_config():
     """Get or update configuration."""
     if request.method == "GET":
         return jsonify(config_get_all())
-    data = request.get_json()
-    for key, value in data.items():
-        if value == "" or value is None:
-            continue
-        if key in ("debounce_seconds", "port"):
-            value = float(value) if "." in str(value) else int(value)
-        config_set(key, value)
-    return jsonify({"ok": True, "config": config_get_all()})
+    data = request.get_json(silent=True) or {}
+    try:
+        for key, value in data.items():
+            # Allow clearing string-typed settings (e.g. resetting backups_dir to default)
+            if key == "backups_dir":
+                config_set(key, value if value else None)
+                continue
+            if value is None or value == "":
+                continue
+            if key == "debounce_seconds":
+                value = float(value)
+            elif key == "port":
+                value = int(value)
+            elif key in ("auto_start_watcher", "streamer_mode"):
+                if not isinstance(value, bool):
+                    value = str(value).lower() in ("true", "1", "yes")
+            config_set(key, value)
+    except (ValueError, TypeError) as e:
+        return jsonify({"ok": False, "error": f"Invalid value: {e}"}), 400
+    return jsonify({"ok": True, "message": "Settings saved", "config": config_get_all()})
 
 
 @app.route("/thumb-backup/<game_mode>/<save_name>/<timestamp>")
