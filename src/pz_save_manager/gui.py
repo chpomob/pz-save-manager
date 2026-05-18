@@ -86,7 +86,7 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 <div class="card-header" onclick="this.parentElement.classList.toggle('open')">
 {% if save.has_thumbnail %}<img src="/thumb/{{save.game_mode}}/{{save.full_name}}" class="thumb" loading="lazy">{% else %}<div class="thumb"></div>{% endif %}
 <div class="info">
-<div class="name" title="{{save.full_name}}">{% if save.player %}{{save.player}} · {% endif %}{{save.name}}</div>
+<div class="name" title="{{save.full_name}}">{{save.name}}</div>
 <div class="sub">{{save.game_mode}}{% if save.map_name %} · {{save.map_name[:18]}}{% endif %} · {{save.modified}}</div>
 </div>
 <div class="status-dot {% if save.player_dead is none %}status-unknown{% elif save.player_dead %}status-dead{% else %}status-alive{% endif %}" title="{% if save.player_dead is none %}Unknown{% elif save.player_dead %}Dead{% else %}Alive{% endif %}"></div>
@@ -128,7 +128,7 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 <div class="card-header" onclick="this.parentElement.classList.toggle('open')">
 {% if b.has_thumbnail %}<img src="/thumb-backup/{{b.game_mode}}/{{b.real_save_name}}/{{b.timestamp}}" class="thumb" loading="lazy">{% else %}<div class="thumb"></div>{% endif %}
 <div class="info">
-<div class="name" title="{{b.formatted}}">{% if b.player %}{{b.player}} · {% endif %}{{b.formatted}}</div>
+<div class="name" title="{{b.formatted}}">{{b.formatted}}</div>
 <div class="sub">{{b.age}}{% if b.auto %} · 🤖 auto{% else %} · ✋ manuel{% endif %}</div>
 </div>
 <div class="status-dot {% if b.player_dead is none %}status-unknown{% elif b.player_dead %}status-dead{% else %}status-alive{% endif %}"></div>
