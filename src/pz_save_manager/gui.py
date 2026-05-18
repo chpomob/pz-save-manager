@@ -162,6 +162,8 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 <input id="cfg-debounce" type="number" step="1" min="1" max="60" style="width:100%;padding:.5rem;margin-top:.3rem;background:var(--bg);border:1px solid var(--accent2);color:var(--text);border-radius:6px"></div>
 <div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted)">Min interval between backups (minutes)</label>
 <input id="cfg-cooldown" type="number" step="1" min="1" max="1440" style="width:100%;padding:.5rem;margin-top:.3rem;background:var(--bg);border:1px solid var(--accent2);color:var(--text);border-radius:6px"></div>
+<div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted)">Max auto-backups per save</label>
+<input id="cfg-max-auto" type="number" step="1" min="1" max="999" style="width:100%;padding:.5rem;margin-top:.3rem;background:var(--bg);border:1px solid var(--accent2);color:var(--text);border-radius:6px"></div>
 <div style="display:flex;gap:.5rem;justify-content:flex-end">
 <button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick="toggleSettings()">Cancel</button>
 <button class="btn btn-sm btn-green" onclick="saveSettings()">Save</button>
@@ -185,8 +187,8 @@ function toggleWatcher(){doAction(null,'/api/watcher/toggle',null)}
 function renameSave(m,n,b){var name=prompt('New name for '+n+':');if(!name||name.trim()===''||name.trim()===n)return;doAction(b,'/api/save/rename',{game_mode:m,old_name:n,new_name:name.trim()},'Renamed to '+name.trim()+'!')}
 function annotate(m,n,t,b){var note=prompt('Note for '+t+' (empty to remove):');if(note===null)return;doAction(b,'/api/backup/annotate',{game_mode:m,save_name:n,timestamp:t,note:note},note?'Note saved':'Note removed')}
 function toggleWatch(m,n,b){doAction(b,'/api/watcher/save',{game_mode:m,save_name:n})}
-function toggleSettings(){var o=document.getElementById('settings-overlay');if(o.style.display==='flex'){o.style.display='none'}else{o.style.display='flex';api('GET','/api/config').then(r=>r.json()).then(d=>{document.getElementById('cfg-backups-dir').value=d.backups_dir||'';document.getElementById("cfg-debounce").value=d.debounce_seconds;document.getElementById("cfg-cooldown").value=d.backup_cooldown_minutes})}}
-function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,debounce_seconds:document.getElementById("cfg-debounce").value,backup_cooldown_minutes:document.getElementById("cfg-cooldown").value};doAction(null,'/api/config',data,'Settings saved!')}
+function toggleSettings(){var o=document.getElementById('settings-overlay');if(o.style.display==='flex'){o.style.display='none'}else{o.style.display='flex';api('GET','/api/config').then(r=>r.json()).then(d=>{document.getElementById('cfg-backups-dir').value=d.backups_dir||'';document.getElementById("cfg-debounce").value=d.debounce_seconds;document.getElementById("cfg-cooldown").value=d.backup_cooldown_minutes;document.getElementById("cfg-max-auto").value=d.max_auto_backups})}}
+function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,debounce_seconds:document.getElementById("cfg-debounce").value,backup_cooldown_minutes:document.getElementById("cfg-cooldown").value,max_auto_backups:document.getElementById("cfg-max-auto").value};doAction(null,'/api/config',data,'Settings saved!')}
 function shutdown(){if(!confirm('Close PZ Save Manager?'))return;api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style="text-align:center;padding:4rem;color:#888"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'}).catch(function(){toast('Network error','var(--red)')})}
 </script>
 </body>
@@ -469,6 +471,8 @@ def api_config():
             if key == "debounce_seconds":
                 value = float(value)
             elif key == "backup_cooldown_minutes":
+                value = int(value)
+            elif key == "max_auto_backups":
                 value = int(value)
             elif key == "port":
                 value = int(value)

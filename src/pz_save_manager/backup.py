@@ -201,7 +201,14 @@ def create_backup(
             (destination / _AUTO_FILE).touch()
         except OSError:
             pass
-    return BackupRecord(game_mode, save_name, timestamp, destination, auto=auto)
+    result = BackupRecord(game_mode, save_name, timestamp, destination, auto=auto)
+    # Prune excess auto-backups (manual backups are never pruned)
+    if auto:
+        from .config import get as config_get
+        max_auto = config_get("max_auto_backups")
+        if isinstance(max_auto, (int, float)) and max_auto >= 0:
+            prune_auto_backups(game_mode, save_name, int(max_auto), backups_root=backups_root)
+    return result
 
 
 def list_backups(
@@ -338,3 +345,45 @@ def rename_backups_for_save(
             f"Cannot rename backups: {old_save_name!r} → {new_save_name!r}: {e}"
         ) from e
     return count
+
+
+def prune_auto_backups(
+    game_mode: str,
+    save_name: str,
+    max_count: int,
+    *,
+    backups_root: Path | str | None = None,
+) -> int:
+    """Delete the oldest auto-backups so at most `max_count` remain.
+
+    Manual backups (no .pz-auto marker) are never deleted.  Returns the
+    number of auto-backups removed.
+    """
+    if max_count < 0:
+        return 0
+    root = _root(backups_root, get_backups_root())
+    save_dir = root / game_mode / save_name
+    if not save_dir.is_dir():
+        return 0
+
+    # Collect auto-backup directories with their timestamps
+    autos: list[tuple[str, Path]] = []
+    for item in save_dir.iterdir():
+        if item.is_dir() and (item / ".pz-auto").is_file():
+            autos.append((item.name, item))
+
+    if len(autos) <= max_count:
+        return 0
+
+    # Sort by timestamp (oldest first) so we delete the oldest
+    autos.sort(key=lambda x: x[0])
+    to_delete = autos[: len(autos) - max_count]
+
+    removed = 0
+    for _, path in to_delete:
+        try:
+            shutil.rmtree(path)
+            removed += 1
+        except OSError:
+            pass
+    return removed

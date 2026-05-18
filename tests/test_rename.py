@@ -1,12 +1,22 @@
-"""Tests for rename operations."""
+"""Tests for rename and prune operations."""
 
 from __future__ import annotations
 
 import pytest
 
-from pz_save_manager.backup import BackupError, create_backup, rename_backups_for_save
+from pz_save_manager.backup import (
+    BackupError,
+    BackupRecord,
+    create_backup,
+    get_backup_note,
+    prune_auto_backups,
+    rename_backups_for_save,
+    set_backup_note,
+)
 from pz_save_manager.saves import SaveManagerError, rename_save
 
+
+# ── Rename tests ─────────────────────────────────────────────────────
 
 def test_rename_save_moves_directory(tmp_path):
     """Renaming a save renames its directory and returns the new SaveGame."""
@@ -59,7 +69,6 @@ def test_rename_save_rejects_existing_destination(tmp_path):
     saves = tmp_path / "saves"
     (saves / "Sandbox" / "World").mkdir(parents=True)
     (saves / "Sandbox" / "Collision").mkdir(parents=True)
-    # Put a file in the target so the rename cannot silently overwrite
     (saves / "Sandbox" / "Collision" / "map.bin").write_text("x", encoding="utf-8")
 
     with pytest.raises(SaveManagerError, match="Cannot rename"):
@@ -77,7 +86,7 @@ def test_rename_save_strips_whitespace(tmp_path):
     assert (saves / "Sandbox" / "Clean").is_dir()
 
 
-# ── Backup renaming ──────────────────────────────────────────────────
+# ── Backup rename tests ───────────────────────────────────────────────
 
 def test_rename_backups_moves_directory(tmp_path):
     """Backups follow the save rename."""
@@ -117,12 +126,10 @@ def test_rename_backups_rejects_collision(tmp_path):
         rename_backups_for_save("Apocalypse", "Alpha", "Bravo", backups_root=backups)
 
 
-# ── Backup annotations ───────────────────────────────────────────────
+# ── Annotation tests ──────────────────────────────────────────────────
 
 def test_set_and_get_backup_note(tmp_path):
     """Set a note, read it back, remove it."""
-    from pz_save_manager.backup import get_backup_note, set_backup_note
-
     backup_dir = tmp_path / "backups" / "Sandbox" / "World" / "20260518-120000"
     backup_dir.mkdir(parents=True)
 
@@ -134,15 +141,12 @@ def test_set_and_get_backup_note(tmp_path):
     set_backup_note(backup_dir, "  Updated note  ")
     assert get_backup_note(backup_dir) == "Updated note"
 
-    # Remove note
     set_backup_note(backup_dir, "")
     assert get_backup_note(backup_dir) is None
 
 
 def test_backup_record_note_property(tmp_path):
     """BackupRecord.note lazily reads the .pz-note sidecar."""
-    from pz_save_manager.backup import BackupRecord, get_backup_note, set_backup_note
-
     backup_dir = tmp_path / "backups" / "Apocalypse" / "Alpha" / "20260518-120000"
     backup_dir.mkdir(parents=True)
 
@@ -152,15 +156,12 @@ def test_backup_record_note_property(tmp_path):
     set_backup_note(backup_dir, "Died to a horde")
     assert record.note == "Died to a horde"
 
-    # set_note method
     record.set_note("New note via method")
     assert get_backup_note(backup_dir) == "New note via method"
 
 
 def test_backup_note_survives_rename(tmp_path):
     """Notes are stored in the backup dir, so they survive rename operations."""
-    from pz_save_manager.backup import create_backup, get_backup_note, rename_backups_for_save, set_backup_note
-
     saves = tmp_path / "saves"
     backups = tmp_path / "backups"
     save_dir = saves / "Sandbox" / "Old"
@@ -174,3 +175,77 @@ def test_backup_note_survives_rename(tmp_path):
 
     new_backup_dir = backups / "Sandbox" / "New" / b.timestamp
     assert get_backup_note(new_backup_dir) == "Before rename"
+
+
+# ── Prune tests ───────────────────────────────────────────────────────
+
+def test_prune_auto_backups_deletes_oldest(tmp_path):
+    """Oldest auto-backups are pruned to respect max_count."""
+    saves = tmp_path / "saves"
+    backups = tmp_path / "backups"
+    save_dir = saves / "Sandbox" / "World"
+    save_dir.mkdir(parents=True)
+    (save_dir / "map.bin").write_text("x", encoding="utf-8")
+
+    # Create 5 auto-backups at different timestamps
+    from datetime import datetime
+    timestamps = []
+    for i in range(5):
+        b = create_backup(
+            "Sandbox", "World",
+            saves_root=saves, backups_root=backups,
+            now=datetime(2026, 5, 18, 12, i, 0),
+            auto=True,
+        )
+        timestamps.append(b.timestamp)
+
+    assert len(list((backups / "Sandbox" / "World").iterdir())) == 5
+
+    # Prune to max 2
+    removed = prune_auto_backups("Sandbox", "World", 2, backups_root=backups)
+    assert removed == 3
+
+    remaining = sorted(d.name for d in (backups / "Sandbox" / "World").iterdir())
+    # The 2 newest should remain (timestamps are YYYYMMDD-HHMMSS format)
+    assert len(remaining) == 2
+    assert remaining == sorted(timestamps[-2:])
+
+
+def test_prune_auto_backups_ignores_manual(tmp_path):
+    """Manual backups (no .pz-auto) are never pruned."""
+    saves = tmp_path / "saves"
+    backups = tmp_path / "backups"
+    save_dir = saves / "Sandbox" / "World"
+    save_dir.mkdir(parents=True)
+    (save_dir / "map.bin").write_text("x", encoding="utf-8")
+
+    from datetime import datetime
+
+    # 2 manual backups
+    for i in range(2):
+        create_backup("Sandbox", "World", saves_root=saves, backups_root=backups,
+                      now=datetime(2026, 5, 18, 12, i, 0), auto=False)
+    # 3 auto-backups
+    for i in range(3):
+        create_backup("Sandbox", "World", saves_root=saves, backups_root=backups,
+                      now=datetime(2026, 5, 18, 13, i, 0), auto=True)
+
+    assert len(list((backups / "Sandbox" / "World").iterdir())) == 5
+
+    # Prune to max 1 auto — should keep 1 auto + 2 manual = 3 total
+    removed = prune_auto_backups("Sandbox", "World", 1, backups_root=backups)
+    assert removed == 2
+
+    autos = [d for d in (backups / "Sandbox" / "World").iterdir() if (d / ".pz-auto").is_file()]
+    manuals = [d for d in (backups / "Sandbox" / "World").iterdir() if not (d / ".pz-auto").is_file()]
+
+    assert len(autos) == 1  # 1 auto remaining
+    assert len(manuals) == 2  # 2 manuals untouched
+
+
+def test_prune_auto_backups_noop_when_under_limit(tmp_path):
+    """No pruning occurs when auto-backup count is within limit."""
+    backups = tmp_path / "backups"
+    (backups / "Sandbox" / "World").mkdir(parents=True)
+    removed = prune_auto_backups("Sandbox", "World", 30, backups_root=backups)
+    assert removed == 0

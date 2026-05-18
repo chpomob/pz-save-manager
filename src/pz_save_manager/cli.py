@@ -167,6 +167,8 @@ def config_command(key: str | None, value: str | None) -> None:
         value = float(value)  # type: ignore
     elif key == "backup_cooldown_minutes":
         value = int(value)  # type: ignore
+    elif key == "max_auto_backups":
+        value = int(value)  # type: ignore
     elif key == "port":
         value = int(value)  # type: ignore
     elif key in ("auto_start_watcher",):
