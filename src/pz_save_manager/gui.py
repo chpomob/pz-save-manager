@@ -516,21 +516,20 @@ def api_shutdown():
     if manager.running:
         manager.stop()
 
+    # Capture the Werkzeug shutdown function while we're still inside the
+    # Flask request context.  The Timer callback runs in a different thread
+    # where flask.request (a thread-local proxy) is empty.
+    shutdown_func = request.environ.get("werkzeug.server.shutdown")
+
     def _shutdown() -> None:
-        # Try Werkzeug dev-server shutdown first (clean, allows in-flight
-        # requests to drain).  Fall back to os._exit only as last resort.
         import sys
-        from flask import request as _req
-        try:
-            func = _req.environ.get("werkzeug.server.shutdown")
-            if func is not None:
-                func()
+        if shutdown_func is not None:
+            try:
+                shutdown_func()
                 return
-        except Exception:
-            pass
-        # If we reach here, we're not running under Werkzeug or the
-        # shutdown callback isn't available.  sys.exit triggers atexit
-        # handlers and __del__ finalisers, unlike os._exit.
+            except Exception:
+                pass
+        # Fallback: sys.exit triggers atexit handlers, unlike os._exit.
         sys.exit(0)
 
     from threading import Timer
