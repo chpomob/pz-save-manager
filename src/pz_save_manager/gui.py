@@ -509,12 +509,25 @@ def api_shutdown():
     if manager.running:
         manager.stop()
 
-    def shutdown_server():
-        import os
-        os._exit(0)
+    def _shutdown() -> None:
+        # Try Werkzeug dev-server shutdown first (clean, allows in-flight
+        # requests to drain).  Fall back to os._exit only as last resort.
+        import sys
+        from flask import request as _req
+        try:
+            func = _req.environ.get("werkzeug.server.shutdown")
+            if func is not None:
+                func()
+                return
+        except Exception:
+            pass
+        # If we reach here, we're not running under Werkzeug or the
+        # shutdown callback isn't available.  sys.exit triggers atexit
+        # handlers and __del__ finalisers, unlike os._exit.
+        sys.exit(0)
 
     from threading import Timer
-    Timer(0.5, shutdown_server).start()
+    Timer(1.0, _shutdown).start()
     return jsonify({"ok": True, "message": "Shutting down..."})
 
 
