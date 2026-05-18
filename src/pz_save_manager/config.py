@@ -6,6 +6,8 @@ Config stored in ~/.pz-save-manager/config.json
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
 
 from .platforms import get_app_dir
@@ -24,14 +26,28 @@ def _load() -> dict:
     if CONFIG_FILE.is_file():
         try:
             return json.loads(CONFIG_FILE.read_text())
-        except Exception:
+        except (json.JSONDecodeError, OSError):
             pass
     return {}
 
 
 def _save(data: dict) -> None:
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(json.dumps(data, indent=2))
+    # Atomic write: write to temp file in the same directory, then replace.
+    # This prevents corruption if the process is killed mid-write.
+    fd, tmp_path = tempfile.mkstemp(
+        suffix=".tmp", prefix=".config-", dir=str(CONFIG_FILE.parent)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, CONFIG_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def get(key: str):
