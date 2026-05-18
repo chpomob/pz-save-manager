@@ -522,6 +522,7 @@ def api_shutdown():
     shutdown_func = request.environ.get("werkzeug.server.shutdown")
 
     def _shutdown() -> None:
+        import os
         import sys
         if shutdown_func is not None:
             try:
@@ -529,11 +530,18 @@ def api_shutdown():
                 return
             except Exception:
                 pass
-        # Fallback: sys.exit triggers atexit handlers, unlike os._exit.
-        sys.exit(0)
+        # sys.exit only kills the request thread, not the main process.
+        # Try it anyway (works in some WSGI servers), but fall back to
+        # os._exit as last resort. The 3-second delay ensures the HTTP
+        # response has time to flush before the process dies.
+        try:
+            sys.exit(0)
+        except SystemExit:
+            pass
+        os._exit(0)
 
     from threading import Timer
-    Timer(1.0, _shutdown).start()
+    Timer(3.0, _shutdown).start()
     return jsonify({"ok": True, "message": "Shutting down..."})
 
 
