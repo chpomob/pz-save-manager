@@ -34,6 +34,7 @@ class SaveWatcher(FileSystemEventHandler):
         self._backups: list[BackupRecord] = []
         self._ignore_until = 0.0  # epoch seconds; events before this are dropped
         self._last_backup_time = 0.0  # epoch seconds of last auto-backup
+        self._last_backup_mtime = 0.0  # save mtime at time of last backup
 
     def pause(self) -> None:
         """Suppress all events until resume() is called.
@@ -74,10 +75,21 @@ class SaveWatcher(FileSystemEventHandler):
         now = time.time()
         if now - self._last_backup_time < self.backup_cooldown_seconds:
             return
+        # Skip if the save hasn't actually changed since the last backup.
+        # On Windows, watchdog can fire on spurious events (AV, indexing,
+        # attribute changes).  We guard against this by comparing mtims.
+        from .saves import get_save_modified_time
+        try:
+            current_mtime = get_save_modified_time(self.save)
+        except OSError:
+            return
+        if current_mtime <= self._last_backup_mtime:
+            return
         try:
             backup = create_backup(self.save.game_mode, self.save.name, auto=True)
             self._backups.append(backup)
             self._last_backup_time = now
+            self._last_backup_mtime = current_mtime
             if self.on_backup:
                 self.on_backup(backup)
         except Exception as e:

@@ -123,7 +123,10 @@ def test_watcher_logs_backup_failures(
 ) -> None:
     import pz_save_manager.watcher as watcher_mod
 
-    save = SaveGame("Sandbox", "World", tmp_path / "missing-save")
+    save_dir = tmp_path / "World"
+    save_dir.mkdir()
+    (save_dir / "map.bin").write_text("x", encoding="utf-8")
+    save = SaveGame("Sandbox", "World", save_dir)
     watcher = watcher_mod.SaveWatcher(save, debounce_seconds=0)
 
     def fail(*args, **kwargs):
