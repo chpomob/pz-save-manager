@@ -39,8 +39,8 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 .card-header{display:flex;align-items:center;padding:.7rem .9rem;cursor:pointer;gap:.6rem;user-select:none;overflow:hidden}
 .card-header .thumb{width:48px;height:36px;border-radius:4px;object-fit:cover;flex-shrink:0;background:var(--accent2)}
 .card-header .info{flex:1 1 0;min-width:0;overflow:hidden}
-.card-header .info .name{font-weight:600;font-size:.85rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;display:block}
-.card-header .info .sub{font-size:.7rem;color:var(--muted);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;display:block}
+.card-header .info .name{font-weight:600;font-size:.85rem;white-space:normal;word-break:break-word;max-width:100%;display:block}
+.card-header .info .sub{font-size:.7rem;color:var(--muted);margin-top:1px;white-space:normal;word-break:break-word;max-width:100%;display:block}
 .card-header .status-dot{width:12px;height:12px;border-radius:50%;flex-shrink:0}
 .status-alive{background:var(--green);box-shadow:0 0 8px var(--green)}
 .status-dead{background:var(--dead)}
@@ -199,12 +199,11 @@ function shutdown(){if(!confirm('Close PZ Save Manager?'))return;api('POST','/ap
 
 def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
     path = save.path
-    short_name = save.name if len(save.name) <= 24 else save.name[:21] + "..."
     modified = datetime.fromtimestamp(get_save_modified_time(save)).strftime("%Y-%m-%d %H:%M")
     backups = list_backups(save.game_mode, save.name)
     extra = extract_all(path)
     info = {
-        "game_mode": save.game_mode, "name": short_name, "full_name": save.name,
+        "game_mode": save.game_mode, "name": save.name, "full_name": save.name,
         "modified": modified,
         "has_thumbnail": extra.get("has_thumbnail", False),
         "backups": [{"game_mode": b.game_mode, "save_name": b.save_name,
