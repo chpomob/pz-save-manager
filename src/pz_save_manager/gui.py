@@ -87,7 +87,7 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 {% if save.has_thumbnail %}<img src="/thumb/{{save.game_mode}}/{{save.full_name}}" class="thumb" loading="lazy">{% else %}<div class="thumb"></div>{% endif %}
 <div class="info">
 <div class="name" title="{{save.full_name}}">{{save.name}}</div>
-<div class="sub">{{save.game_mode}}{% if save.map_name %} · {{save.map_name[:18]}}{% endif %} · {{save.modified}}</div>
+<div class="sub">{{save.game_mode}} · {{save.modified}}</div>
 </div>
 <div class="status-dot {% if save.player_dead is none %}status-unknown{% elif save.player_dead %}status-dead{% else %}status-alive{% endif %}" title="{% if save.player_dead is none %}Unknown{% elif save.player_dead %}Dead{% else %}Alive{% endif %}"></div>
 <span class="arrow">▾</span>
@@ -210,7 +210,7 @@ def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
         } for b in backups[:5]],
         "watched": save.display_name in manager.watched_saves(),
     }
-    for k in ("players", "map_pos", "map_name", "mod_count",
+    for k in ("players", "map_pos", "mod_count",
               "player", "player_dead", "player_x", "player_y", "player_world_version"):
         if k in extra:
             info[k] = extra[k]
