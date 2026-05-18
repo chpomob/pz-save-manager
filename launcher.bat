@@ -13,3 +13,4 @@ echo Starting PZ Save Manager...
 echo Open http://127.0.0.1:8080 in your browser
 call .venv\Scripts\python -m pz_save_manager gui
 pause
+\r
