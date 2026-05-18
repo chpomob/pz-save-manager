@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from watchdog.events import FileSystemEventHandler
@@ -29,12 +30,36 @@ class SaveWatcher(FileSystemEventHandler):
         self._timer: threading.Timer | None = None
         self._lock = threading.Lock()
         self._backups: list[BackupRecord] = []
+        self._ignore_until = 0.0  # epoch seconds; events before this are dropped
+
+    def pause(self) -> None:
+        """Suppress all events until resume() is called.
+
+        Used during operations that legitimately rewrite the save dir
+        (e.g. restore_backup), so the watcher doesn't immediately back
+        up the just-restored content. Any pending debounce timer is
+        cancelled.
+        """
+        with self._lock:
+            self._ignore_until = float("inf")
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+
+    def resume(self, grace_seconds: float = 1.0) -> None:
+        """Re-enable events, with a short grace window for in-flight
+        watchdog events from the paused operation to drain."""
+        with self._lock:
+            self._ignore_until = time.time() + grace_seconds
 
     def on_modified(self, event) -> None:
         if event.is_directory:
             return
+        now = time.time()
         with self._lock:
-            self._last_event = time.time()
+            if now < self._ignore_until:
+                return
+            self._last_event = now
             if self._timer is not None:
                 self._timer.cancel()
             self._timer = threading.Timer(self.debounce_seconds, self._do_backup)
@@ -119,6 +144,24 @@ class WatcherManager:
         if key in self._watchers:
             return list(self._watchers[key]._backups)
         return []
+
+    @contextmanager
+    def pause_for(self, save: SaveGame):
+        """Context manager: temporarily silence the watcher for `save`.
+
+        No-op if the save isn't being watched. After the block exits,
+        the watcher resumes with a short grace window so any file
+        events still in watchdog's queue from the operation get dropped
+        instead of triggering an immediate auto-backup.
+        """
+        watcher = self._watchers.get(save.display_name)
+        if watcher is not None:
+            watcher.pause()
+        try:
+            yield
+        finally:
+            if watcher is not None:
+                watcher.resume()
 
 
 # Global instance

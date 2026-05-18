@@ -351,11 +351,23 @@ def api_restore():
     data, err = _need(request.get_json(silent=True), "game_mode", "save_name", "timestamp")
     if err:
         return err
+    from contextlib import nullcontext
+    from .saves import get_save
+    manager = get_manager()
+    # If the target save is currently being watched, suppress watcher events
+    # while restore writes files in — otherwise the watcher would create an
+    # immediate auto-backup of the just-restored content.
     try:
-        restore_backup(data["game_mode"], data["save_name"], data["timestamp"])
-        return jsonify({"ok": True})
-    except (BackupNotFound, BackupError) as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
+        live_save = get_save(data["game_mode"], data["save_name"])
+        pause_ctx = manager.pause_for(live_save)
+    except SaveNotFound:
+        pause_ctx = nullcontext()
+    with pause_ctx:
+        try:
+            restore_backup(data["game_mode"], data["save_name"], data["timestamp"])
+            return jsonify({"ok": True})
+        except (BackupNotFound, BackupError) as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
 
 
 @app.route("/api/backup/delete", methods=["POST"])
