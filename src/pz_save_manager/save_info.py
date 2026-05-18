@@ -73,12 +73,11 @@ def player_info(save_path: Path) -> dict | None:
     if not path.is_file():
         return None
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        cur = conn.execute(
-            "SELECT name, isDead, x, y, z, wx, wy, worldversion FROM localPlayers LIMIT 1"
-        )
-        row = cur.fetchone()
-        conn.close()
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+            cur = conn.execute(
+                "SELECT name, isDead, x, y, z, wx, wy, worldversion FROM localPlayers LIMIT 1"
+            )
+            row = cur.fetchone()
         if not row:
             return None
         return {
@@ -149,10 +148,9 @@ def count_vehicles(save_path: Path) -> int | None:
     if not path.is_file():
         return None
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        cur = conn.execute("SELECT COUNT(*) FROM vehicles")
-        count = cur.fetchone()[0]
-        conn.close()
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+            cur = conn.execute("SELECT COUNT(*) FROM vehicles")
+            count = cur.fetchone()[0]
         return count
     except Exception:
         return None
@@ -166,14 +164,12 @@ def count_players(save_path: Path) -> int | None:
     if not path.is_file() or path.stat().st_size == 0:
         return None
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
-        if "players" in tables:
-            cur = conn.execute("SELECT COUNT(*) FROM players")
-            count = cur.fetchone()[0]
-            conn.close()
-            return count
-        conn.close()
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+            tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+            if "players" in tables:
+                cur = conn.execute("SELECT COUNT(*) FROM players")
+                count = cur.fetchone()[0]
+                return count
         return None
     except Exception:
         return None
