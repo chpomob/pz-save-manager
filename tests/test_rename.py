@@ -249,3 +249,22 @@ def test_prune_auto_backups_noop_when_under_limit(tmp_path):
     (backups / "Sandbox" / "World").mkdir(parents=True)
     removed = prune_auto_backups("Sandbox", "World", 30, backups_root=backups)
     assert removed == 0
+
+
+def test_prune_auto_backups_zero_disables_pruning(tmp_path):
+    """max_count=0 disables pruning entirely (keeps all backups)."""
+    saves = tmp_path / "saves"
+    backups = tmp_path / "backups"
+    save_dir = saves / "Sandbox" / "World"
+    save_dir.mkdir(parents=True)
+    (save_dir / "map.bin").write_text("x", encoding="utf-8")
+
+    from datetime import datetime
+    for i in range(3):
+        create_backup("Sandbox", "World", saves_root=saves, backups_root=backups,
+                      now=datetime(2026, 5, 18, 12, i, 0), auto=True)
+
+    assert len(list((backups / "Sandbox" / "World").iterdir())) == 3
+    removed = prune_auto_backups("Sandbox", "World", 0, backups_root=backups)
+    assert removed == 0
+    assert len(list((backups / "Sandbox" / "World").iterdir())) == 3

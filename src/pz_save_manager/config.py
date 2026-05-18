@@ -17,7 +17,7 @@ CONFIG_FILE = get_app_dir() / "config.json"
 DEFAULTS = {
     "backups_dir": None,
     "debounce_seconds": 5.0,
-    "backup_cooldown_minutes": 5,
+    "backup_cooldown_minutes": 1,
     "max_auto_backups": 30,
     "auto_start_watcher": False,
     "port": 8080,
