@@ -35,9 +35,21 @@ clean web interface.
 
 ### Windows
 
+**Prerequisite — install Python from python.org (not the Microsoft Store):**
+
+1. Download Python 3.10+ from <https://www.python.org/downloads/>
+2. During install, **tick the "Add python.exe to PATH" checkbox** (it's off by default)
+3. Verify in a new `cmd` window: `py -3 --version` should print a version
+
+> **Why not the Store version?** Windows ships a `python` stub that opens the Microsoft Store instead of running Python. It can't create virtual environments and breaks the launcher. If you've used it before, disable the alias in *Paramètres → Applications → Paramètres avancés des applications → Alias d'exécution d'application* (toggle off `python.exe` and `python3.exe`).
+
+**Then launch the app:**
+
 1. Download and extract the project
-2. Double-click `launcher.bat`
+2. Double-click `launcher.bat` — first run installs dependencies, next runs are instant
 3. The web UI opens in your browser → done!
+
+If you previously ran the launcher with a broken Python install, delete the `.venv` folder in the project directory before retrying.
 
 ### Linux / macOS
 
