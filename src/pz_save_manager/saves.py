@@ -137,8 +137,8 @@ def rename_save(
     old = get_save(game_mode, old_name, saves_root=saves_root)
     root = _to_root(saves_root)
     new_path = root / game_mode / new_name.strip()
-    if new_path.exists():
-        raise SaveManagerError(f"A save named {new_name!r} already exists in {game_mode}")
-
-    old.path.rename(new_path)
+    try:
+        old.path.rename(new_path)
+    except OSError as e:
+        raise SaveManagerError(f"Cannot rename save to {new_name!r}: {e}") from e
     return SaveGame(game_mode, new_name.strip(), new_path)

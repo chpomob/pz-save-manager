@@ -55,12 +55,14 @@ def test_rename_save_rejects_multiplayer_name(tmp_path):
 
 
 def test_rename_save_rejects_existing_destination(tmp_path):
-    """Cannot rename to a name that already exists."""
+    """Cannot rename to a name that already exists with content."""
     saves = tmp_path / "saves"
     (saves / "Sandbox" / "World").mkdir(parents=True)
     (saves / "Sandbox" / "Collision").mkdir(parents=True)
+    # Put a file in the target so the rename cannot silently overwrite
+    (saves / "Sandbox" / "Collision" / "map.bin").write_text("x", encoding="utf-8")
 
-    with pytest.raises(SaveManagerError, match="already exists"):
+    with pytest.raises(SaveManagerError, match="Cannot rename"):
         rename_save("Sandbox", "World", "Collision", saves_root=saves)
 
 
@@ -111,7 +113,7 @@ def test_rename_backups_rejects_collision(tmp_path):
         (sd / "map.bin").write_text("x", encoding="utf-8")
         create_backup("Apocalypse", name, saves_root=saves, backups_root=backups)
 
-    with pytest.raises(BackupError, match="already has backups"):
+    with pytest.raises(BackupError, match="Cannot rename"):
         rename_backups_for_save("Apocalypse", "Alpha", "Bravo", backups_root=backups)
 
 

@@ -310,12 +310,13 @@ def rename_backups_for_save(
 
     if not old_dir.is_dir():
         return 0
-    if new_dir.exists():
-        raise BackupError(
-            f"Cannot rename backups: {new_save_name!r} already has backups in {game_mode}"
-        )
 
     # Count backups before moving
     count = sum(1 for _ in old_dir.iterdir() if _.is_dir())
-    old_dir.rename(new_dir)
+    try:
+        old_dir.rename(new_dir)
+    except OSError as e:
+        raise BackupError(
+            f"Cannot rename backups: {old_save_name!r} → {new_save_name!r}: {e}"
+        ) from e
     return count
