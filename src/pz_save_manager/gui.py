@@ -59,6 +59,7 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 .btn{padding:.4rem .85rem;border:none;border-radius:6px;cursor:pointer;font-size:.78rem;font-weight:600;transition:filter .15s}
 .btn:hover{filter:brightness(1.15)}.btn:active{transform:translateY(1px)}
 .btn-accent{background:var(--accent);color:#fff}.btn-green{background:var(--green);color:#000}.btn-red{background:var(--red);color:#fff}
+.help{display:inline-block;width:16px;height:16px;line-height:16px;text-align:center;border-radius:50%;background:var(--accent2);color:var(--text);font-size:.65rem;font-weight:700;cursor:help;margin-left:4px;vertical-align:middle}
 .btn-sm{padding:.25rem .6rem;font-size:.72rem}
 .actions{display:flex;gap:.4rem;margin-top:.5rem;flex-wrap:wrap}
 .empty{text-align:center;padding:3rem;color:var(--muted)}
@@ -156,13 +157,11 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 <div id="settings-overlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);z-index:100;justify-content:center;align-items:center" onclick="if(event.target===this)toggleSettings()">
 <div style="background:var(--surface);padding:2rem;border-radius:var(--radius);max-width:450px;width:90%;border:1px solid var(--accent)">
 <h3 style="margin-bottom:1rem">⚙ Settings</h3>
-<div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted)">Backup directory</label>
+<div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted)">Backup directory <span class="help" title="Where backups are stored. Default: ~/.pz-save-manager/backups">?</span></label>
 <input id="cfg-backups-dir" style="width:100%;padding:.5rem;margin-top:.3rem;background:var(--bg);border:1px solid var(--accent2);color:var(--text);border-radius:6px" placeholder="Default: ~/.pz-save-manager/backups"></div>
-<div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted)">Auto-backup delay (seconds)</label>
-<input id="cfg-debounce" type="number" step="1" min="1" max="60" style="width:100%;padding:.5rem;margin-top:.3rem;background:var(--bg);border:1px solid var(--accent2);color:var(--text);border-radius:6px"></div>
-<div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted)">Min interval between backups (minutes)</label>
+<div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted)">Min interval between backups (minutes) <span class="help" title="After an auto-backup, the watcher waits at least this long before making another one. Prevents backup spam during intense gameplay.">?</span></label>
 <input id="cfg-cooldown" type="number" step="1" min="1" max="1440" style="width:100%;padding:.5rem;margin-top:.3rem;background:var(--bg);border:1px solid var(--accent2);color:var(--text);border-radius:6px"></div>
-<div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted)">Max auto-backups per save</label>
+<div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted)">Max auto-backups per save <span class="help" title="Maximum number of automatic backups kept per save. Oldest auto-backups are deleted when this limit is reached. Manual backups are never pruned.">?</span></label>
 <input id="cfg-max-auto" type="number" step="1" min="1" max="999" style="width:100%;padding:.5rem;margin-top:.3rem;background:var(--bg);border:1px solid var(--accent2);color:var(--text);border-radius:6px"></div>
 <div style="display:flex;gap:.5rem;justify-content:flex-end">
 <button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick="toggleSettings()">Cancel</button>
@@ -170,6 +169,7 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 </div>
 </div>
 </div>
+<script>
 <script>
 function toast(m,c){var t=document.getElementById('toast');t.textContent=m;t.style.background=c||'var(--green)';t.style.display='block';setTimeout(function(){t.style.display='none'},2500)}
 function api(m,u,b){return fetch(u,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined})}
@@ -187,8 +187,8 @@ function toggleWatcher(){doAction(null,'/api/watcher/toggle',null)}
 function renameSave(m,n,b){var name=prompt('New name for '+n+':');if(!name||name.trim()===''||name.trim()===n)return;doAction(b,'/api/save/rename',{game_mode:m,old_name:n,new_name:name.trim()},'Renamed to '+name.trim()+'!')}
 function annotate(m,n,t,b){var note=prompt('Note for '+t+' (empty to remove):');if(note===null)return;doAction(b,'/api/backup/annotate',{game_mode:m,save_name:n,timestamp:t,note:note},note?'Note saved':'Note removed')}
 function toggleWatch(m,n,b){doAction(b,'/api/watcher/save',{game_mode:m,save_name:n})}
-function toggleSettings(){var o=document.getElementById('settings-overlay');if(o.style.display==='flex'){o.style.display='none'}else{o.style.display='flex';api('GET','/api/config').then(r=>r.json()).then(d=>{document.getElementById('cfg-backups-dir').value=d.backups_dir||'';document.getElementById("cfg-debounce").value=d.debounce_seconds;document.getElementById("cfg-cooldown").value=d.backup_cooldown_minutes;document.getElementById("cfg-max-auto").value=d.max_auto_backups})}}
-function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,debounce_seconds:document.getElementById("cfg-debounce").value,backup_cooldown_minutes:document.getElementById("cfg-cooldown").value,max_auto_backups:document.getElementById("cfg-max-auto").value};doAction(null,'/api/config',data,'Settings saved!')}
+function toggleSettings(){var o=document.getElementById('settings-overlay');if(o.style.display==='flex'){o.style.display='none'}else{o.style.display='flex';api('GET','/api/config').then(r=>r.json()).then(d=>{document.getElementById('cfg-backups-dir').value=d.backups_dir||'';document.getElementById("cfg-cooldown").value=d.backup_cooldown_minutes;document.getElementById("cfg-max-auto").value=d.max_auto_backups})}}
+function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,backup_cooldown_minutes:document.getElementById("cfg-cooldown").value,max_auto_backups:document.getElementById("cfg-max-auto").value};doAction(null,'/api/config',data,'Settings saved!')}
 function shutdown(){if(!confirm('Close PZ Save Manager?'))return;api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style="text-align:center;padding:4rem;color:#888"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'}).catch(function(){toast('Network error','var(--red)')})}
 </script>
 </body>
