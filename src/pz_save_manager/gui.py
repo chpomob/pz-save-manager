@@ -127,7 +127,7 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 <div class="card-header" onclick="this.parentElement.classList.toggle('open')">
 {% if b.has_thumbnail %}<img src="/thumb-backup/{{b.game_mode}}/{{b.real_save_name}}/{{b.timestamp}}" class="thumb" loading="lazy">{% else %}<div class="thumb"></div>{% endif %}
 <div class="info">
-<div class="name" title="{{b.timestamp}}">{% if b.player %}{{b.player}} · {% endif %}{{b.timestamp}}</div>
+<div class="name" title="{{b.formatted}}">{% if b.player %}{{b.player}} · {% endif %}{{b.formatted}}</div>
 <div class="sub">{{b.age}}{% if b.auto %} · 🤖 auto{% else %} · ✋ manuel{% endif %}</div>
 </div>
 <div class="status-dot {% if b.player_dead is none %}status-unknown{% elif b.player_dead %}status-dead{% else %}status-alive{% endif %}"></div>
@@ -137,7 +137,7 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 <div class="detail-grid">
 <div class="detail-item"><strong>Status</strong> {% if b.player_dead is none %}Unknown{% elif b.player_dead %}💀 Dead{% else %}🟢 Alive{% endif %}</div>
 {% if b.player %}<div class="detail-item"><strong>Player</strong> {{b.player}}</div>{% endif %}
-<div class="detail-item"><strong>Timestamp</strong> {{b.timestamp}}</div>
+<div class="detail-item"><strong>Timestamp</strong> {{b.formatted}}</div>
 <div class="detail-item"><strong>Age</strong> {{b.age}}</div>
 <div class="detail-item"><strong>Type</strong> {% if b.auto %}🤖 Automatic{% else %}✋ Manual{% endif %}</div>
 <div class="detail-item"><strong>Save</strong> {{b.game_mode}} / {{b.save_name[:30]}}</div>
@@ -206,7 +206,7 @@ def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
         "modified": modified,
         "has_thumbnail": extra.get("has_thumbnail", False),
         "backups": [{"game_mode": b.game_mode, "save_name": b.save_name,
-            "timestamp": b.timestamp, "auto": b.auto, "age": b.age,
+            "timestamp": b.timestamp, "auto": b.auto, "age": b.age, "formatted": b.formatted,
         } for b in backups[:5]],
         "watched": save.display_name in manager.watched_saves(),
     }
@@ -241,7 +241,7 @@ def index():
             display_name = b.save_name
             all_b.append({
                 "game_mode": b.game_mode, "save_name": display_name, "real_save_name": b.save_name,
-                "timestamp": b.timestamp, "auto": b.auto, "age": b.age,
+                "timestamp": b.timestamp, "auto": b.auto, "age": b.age, "formatted": b.formatted,
                 "has_thumbnail": (b.path / "thumb.png").is_file(),
                 "player": pi.get("name"),
                 "player_dead": pi.get("is_dead"),

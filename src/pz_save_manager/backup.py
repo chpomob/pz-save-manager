@@ -76,6 +76,15 @@ class BackupRecord:
         return dt.strftime("%d/%m/%Y")
 
     @property
+    def formatted(self) -> str:
+        """Human-readable date/time (e.g. '2026-05-18 12:11:48')."""
+        try:
+            dt = datetime.strptime(self.timestamp, "%Y%m%d-%H%M%S")
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return self.timestamp
+
+    @property
     def note(self) -> str | None:
         """User annotation stored alongside the backup (read lazily)."""
         return get_backup_note(self.path)
