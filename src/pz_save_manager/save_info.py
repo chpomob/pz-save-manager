@@ -106,7 +106,7 @@ def crafted_objects(save_path: Path) -> int | None:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    return len(re.findall(r"registeryID\s*=", text))
+    return len(re.findall(r"registryID\s*=", text))  # P0: fixed typo 'registeryID' → 'registryID'
 
 
 # ---- WorldDictionaryReadable.lua ----

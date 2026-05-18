@@ -56,8 +56,10 @@ class SaveWatcher(FileSystemEventHandler):
             self._backups.append(backup)
             if self.on_backup:
                 self.on_backup(backup)
-        except Exception:
-            pass  # Silent fail during auto-backup
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error("Auto-backup failed for %s/%s: %s", self.save.game_mode, self.save.name, e, exc_info=True)
 
 
 class WatcherManager:

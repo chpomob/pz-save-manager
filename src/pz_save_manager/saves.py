@@ -73,6 +73,10 @@ def list_saves(saves_root: Path | str | None = None) -> list[SaveGame]:
 
 def get_save(game_mode: str, save_name: str, saves_root: Path | str | None = None) -> SaveGame:
     """Return a specific save or raise SaveNotFound."""
+    # P0: prevent path traversal — reject '..' and '/' in components
+    for val, label in ((game_mode, "game_mode"), (save_name, "save_name")):
+        if ".." in val or "/" in val or "\\" in val:
+            raise SaveNotFound(f"Invalid {label}: {val!r}")
     root = _to_root(saves_root)
     path = root / game_mode / save_name
     if not path.is_dir():

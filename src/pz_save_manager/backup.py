@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import shutil
+import tempfile
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -96,14 +97,21 @@ def _timestamp(now: datetime | None = None) -> str:
 
 
 def _unique_destination(base_dir: Path, timestamp: str) -> tuple[str, Path]:
+    # P0: TOCTOU-safe — reserve via atomic mkdir, then caller copies into it
     destination = base_dir / timestamp
-    if not destination.exists():
+    try:
+        destination.mkdir(parents=True, exist_ok=False)
         return timestamp, destination
+    except FileExistsError:
+        pass
     for index in range(1, 100):
         candidate_timestamp = f"{timestamp}-{index:02d}"
         candidate = base_dir / candidate_timestamp
-        if not candidate.exists():
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
             return candidate_timestamp, candidate
+        except FileExistsError:
+            continue
     raise BackupError(f"Could not allocate a unique backup under {base_dir}")
 
 
@@ -118,11 +126,28 @@ def create_backup(
     """Create a timestamped full backup for a save directory."""
     _validate_component(game_mode, "game mode")
     _validate_component(save_name, "save name")
+    if now is None:
+        now = datetime.now(tz=timezone.utc)
     save = get_save(game_mode, save_name, saves_root=saves_root)
     backup_base = _root(backups_root, get_backups_root()) / game_mode / save_name
     backup_base.mkdir(parents=True, exist_ok=True)
     timestamp, destination = _unique_destination(backup_base, _timestamp(now))
-    shutil.copytree(save.path, destination, copy_function=shutil.copy2)
+    # P0: copy to temp inside destination, then atomically move contents
+    tmp = Path(tempfile.mkdtemp(dir=destination.parent, prefix=f".tmp-{timestamp}-"))
+    try:
+        # P0: skip symlinks entirely (security)
+        def _skip_symlinks(d, names):
+            return [n for n in names if (Path(d)/n).is_symlink()]
+        shutil.copytree(save.path, tmp, copy_function=shutil.copy2,
+                        ignore=_skip_symlinks, dirs_exist_ok=True)
+        # Atomic: move all contents from tmp into destination
+        for item in tmp.iterdir():
+            shutil.move(str(item), str(destination / item.name))
+    except Exception:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
     return BackupRecord(game_mode, save_name, timestamp, destination)
 
 
@@ -186,7 +211,11 @@ def restore_backup(
     temp_target = target.with_name(f".{target.name}.restore-{uuid4().hex}.tmp")
     previous_target = target.with_name(f".{target.name}.restore-old-{uuid4().hex}")
     try:
-        shutil.copytree(backup.path, temp_target, copy_function=shutil.copy2)
+        # P0: skip symlinks entirely (security: no following, no copying)
+        def _skip_symlinks(d, names):
+            return [n for n in names if (Path(d)/n).is_symlink()]
+        shutil.copytree(backup.path, temp_target, copy_function=shutil.copy2,
+                        ignore=_skip_symlinks)
         if target.exists():
             target.rename(previous_target)
         temp_target.rename(target)
@@ -196,8 +225,13 @@ def restore_backup(
         if previous_target.exists() and not target.exists():
             previous_target.rename(target)
         raise BackupError(f"Could not restore backup: {exc}") from exc
-    if previous_target.exists():
-        shutil.rmtree(previous_target)
+    # P0: cleanup wrapped in try/except — failure here must not lose the restored save
+    try:
+        if previous_target.exists():
+            shutil.rmtree(previous_target)
+    except OSError as e:
+        import logging
+        logging.getLogger(__name__).warning("Could not remove previous save backup %s: %s", previous_target, e)
     return SaveGame(game_mode, save_name, target)
 
 

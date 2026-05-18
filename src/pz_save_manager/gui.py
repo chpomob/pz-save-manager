@@ -107,8 +107,8 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 {% if save.players %}<div class="detail-item"><strong>Players</strong> {{save.players}}</div>{% endif %}
 </div>
 <div class="actions">
-<button class="btn btn-accent" onclick="event.stopPropagation();backup('{{save.game_mode}}','{{save.full_name}}',this)">💾 Backup</button>
-<button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick="event.stopPropagation();toggleWatch('{{save.game_mode}}','{{save.full_name}}',this)">{{'⏸ Unwatch' if save.watched else '👁 Watch'}}</button>
+<button class="btn btn-accent" onclick="event.stopPropagation();backup({{save.game_mode|tojson}},{{save.full_name|tojson}},this)">💾 Backup</button>
+<button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick="event.stopPropagation();toggleWatch({{save.game_mode|tojson}},{{save.full_name|tojson}},this)">{{'⏸ Unwatch' if save.watched else '👁 Watch'}}</button>
 </div>
 </div>
 </div>
