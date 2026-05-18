@@ -232,27 +232,101 @@ def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
 
 @app.route("/")
 def index():
-    manager = get_manager()
-    saves = list_saves()
-    save_infos = [_save_info(s, manager) for s in saves]
-    all_backups = list_backups()
-    streamer = config_get_all().get("streamer_mode", False)
-    all_b = []
-    for b in all_backups:
-        pi = extract_all(b.path)
-        display_name = _censor(b.save_name) if streamer else b.save_name
-        all_b.append({
-            "game_mode": b.game_mode, "save_name": display_name, "real_save_name": b.save_name,
-            "timestamp": b.timestamp, "auto": b.auto,
-            "size": f"{b.size_mb} MB", "files": b.file_count, "age": b.age,
-            "has_thumbnail": (b.path / "thumb.png").is_file(),
-            "player_dead": pi.get("player_dead"),
-        })
-    # Apply censor to save display names too if streamer mode
-    if streamer:
-        for info in save_infos:
-            info["name"] = _censor(info["full_name"])[:24]
-    return render_template_string(PAGE, saves=save_infos, all_backups=all_b, watcher_running=manager.running)
+    try:
+        manager = get_manager()
+        saves = list_saves()
+        save_infos = [_save_info(s, manager) for s in saves]
+        all_backups = list_backups()
+        streamer = config_get_all().get("streamer_mode", False)
+        all_b = []
+        for b in all_backups:
+            pi = extract_all(b.path)
+            display_name = _censor(b.save_name) if streamer else b.save_name
+            all_b.append({
+                "game_mode": b.game_mode, "save_name": display_name, "real_save_name": b.save_name,
+                "timestamp": b.timestamp, "auto": b.auto,
+                "size": f"{b.size_mb} MB", "files": b.file_count, "age": b.age,
+                "has_thumbnail": (b.path / "thumb.png").is_file(),
+                "player_dead": pi.get("player_dead"),
+            })
+        if streamer:
+            for info in save_infos:
+                info["name"] = _censor(info["full_name"])[:24]
+        return render_template_string(PAGE, saves=save_infos, all_backups=all_b, watcher_running=manager.running)
+    except Exception:
+        import traceback
+        tb = traceback.format_exc()
+        import logging
+        logging.getLogger(__name__).exception("index render failed")
+        return (
+            "<!doctype html><meta charset='utf-8'>"
+            "<style>body{font-family:monospace;background:#111;color:#eee;padding:2rem}"
+            "pre{white-space:pre-wrap;background:#222;padding:1rem;border-radius:6px}"
+            "a{color:#e94560}</style>"
+            "<h2>PZ Save Manager — internal error</h2>"
+            f"<p>The page failed to render. <a href='/health'>Open /health</a> for diagnostics.</p>"
+            f"<pre>{tb}</pre>",
+            500,
+        )
+
+
+@app.route("/health")
+def health():
+    """Plain-text diagnostic page — shows resolved paths and what was discovered.
+
+    Useful when a user reports a blank page: navigating to /health bypasses
+    most of the rendering code and surfaces the underlying environment.
+    """
+    import json
+    import platform as _platform
+    import sys
+    from . import __version__
+
+    saves_root = get_saves_root()
+    backups_root = get_backups_root()
+    info: dict = {
+        "version": __version__,
+        "python": sys.version,
+        "executable": sys.executable,
+        "platform": _platform.platform(),
+        "frozen": getattr(sys, "frozen", False),
+        "saves_root": str(saves_root),
+        "saves_root_exists": saves_root.is_dir(),
+        "backups_root": str(backups_root),
+        "backups_root_exists": backups_root.is_dir(),
+        "errors": [],
+    }
+    try:
+        saves = list_saves()
+        info["save_count"] = len(saves)
+        info["saves"] = [{"game_mode": s.game_mode, "name": s.name, "path": str(s.path)} for s in saves]
+    except Exception as e:
+        info["errors"].append(f"list_saves: {e!r}")
+    try:
+        info["backup_count"] = len(list_backups())
+    except Exception as e:
+        info["errors"].append(f"list_backups: {e!r}")
+    if saves_root.is_dir():
+        try:
+            info["saves_root_children"] = sorted(p.name for p in saves_root.iterdir())
+        except Exception as e:
+            info["errors"].append(f"iterdir saves_root: {e!r}")
+    else:
+        zomboid = saves_root.parent
+        info["zomboid_dir_exists"] = zomboid.is_dir()
+        if zomboid.is_dir():
+            try:
+                info["zomboid_dir_children"] = sorted(p.name for p in zomboid.iterdir())
+            except Exception as e:
+                info["errors"].append(f"iterdir zomboid: {e!r}")
+
+    return (
+        "<!doctype html><meta charset='utf-8'>"
+        "<style>body{font-family:monospace;background:#111;color:#eee;padding:2rem}"
+        "pre{white-space:pre-wrap;background:#222;padding:1rem;border-radius:6px}</style>"
+        "<h2>PZ Save Manager — /health</h2>"
+        f"<pre>{json.dumps(info, indent=2, default=str)}</pre>"
+    )
 
 
 @app.route("/api/backup", methods=["POST"])
@@ -376,6 +450,15 @@ def api_shutdown():
 def run_gui(host: str = "127.0.0.1", port: int = 8080) -> None:
     import webbrowser
     url = f"http://{host}:{port}"
-    print(f"\n  🧟 PZ Save Manager — {url}\n")
+    saves_root = get_saves_root()
+    try:
+        save_count = len(list_saves())
+    except Exception as e:
+        save_count = f"error: {e!r}"
+    print(f"\n  PZ Save Manager - {url}")
+    print(f"  Saves dir : {saves_root} (exists={saves_root.is_dir()})")
+    print(f"  Backups   : {get_backups_root()}")
+    print(f"  Found     : {save_count} save(s)")
+    print(f"  Diagnostics: {url}/health\n")
     webbrowser.open(url)
     app.run(host=host, port=port, debug=False)
