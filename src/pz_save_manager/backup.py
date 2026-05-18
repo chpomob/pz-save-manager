@@ -158,6 +158,7 @@ def create_backup(
     saves_root: Path | str | None = None,
     backups_root: Path | str | None = None,
     now: datetime | None = None,
+    auto: bool = False,
 ) -> BackupRecord:
     """Create a timestamped full backup for a save directory."""
     _validate_component(game_mode, "game mode")
@@ -184,7 +185,14 @@ def create_backup(
         raise
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    return BackupRecord(game_mode, save_name, timestamp, destination)
+    # Persist auto/manual marker
+    if auto:
+        _AUTO_FILE = ".pz-auto"
+        try:
+            (destination / _AUTO_FILE).touch()
+        except OSError:
+            pass
+    return BackupRecord(game_mode, save_name, timestamp, destination, auto=auto)
 
 
 def list_backups(
@@ -210,7 +218,8 @@ def list_backups(
                 continue
             for backup_dir in save_dir.iterdir():
                 if backup_dir.is_dir():
-                    records.append(BackupRecord(mode_dir.name, save_dir.name, backup_dir.name, backup_dir))
+                    auto = (backup_dir / ".pz-auto").is_file()
+                    records.append(BackupRecord(mode_dir.name, save_dir.name, backup_dir.name, backup_dir, auto=auto))
     return sorted(
         records,
         key=lambda backup: (backup.game_mode.casefold(), backup.save_name.casefold(), backup.timestamp),

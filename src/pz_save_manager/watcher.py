@@ -75,16 +75,7 @@ class SaveWatcher(FileSystemEventHandler):
         if now - self._last_backup_time < self.backup_cooldown_seconds:
             return
         try:
-            backup = create_backup(self.save.game_mode, self.save.name)
-            # Mark as auto-backup by creating a new record with auto=True
-            from .backup import BackupRecord
-            backup = BackupRecord(
-                game_mode=backup.game_mode,
-                save_name=backup.save_name,
-                timestamp=backup.timestamp,
-                path=backup.path,
-                auto=True,
-            )
+            backup = create_backup(self.save.game_mode, self.save.name, auto=True)
             self._backups.append(backup)
             self._last_backup_time = now
             if self.on_backup:
