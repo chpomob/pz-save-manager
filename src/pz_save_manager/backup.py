@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -173,7 +173,7 @@ def create_backup(
     _validate_component(game_mode, "game mode")
     _validate_component(save_name, "save name")
     if now is None:
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now()
     save = get_save(game_mode, save_name, saves_root=saves_root)
     backup_base = _root(backups_root, get_backups_root()) / game_mode / save_name
     backup_base.mkdir(parents=True, exist_ok=True)
