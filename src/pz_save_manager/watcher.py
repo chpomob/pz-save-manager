@@ -21,16 +21,19 @@ class SaveWatcher(FileSystemEventHandler):
         self,
         save: SaveGame,
         debounce_seconds: float = 5.0,
+        backup_cooldown_seconds: float = 300.0,
         on_backup: callable | None = None,
     ) -> None:
         self.save = save
         self.debounce_seconds = debounce_seconds
+        self.backup_cooldown_seconds = backup_cooldown_seconds
         self.on_backup = on_backup
         self._last_event = 0.0
         self._timer: threading.Timer | None = None
         self._lock = threading.Lock()
         self._backups: list[BackupRecord] = []
         self._ignore_until = 0.0  # epoch seconds; events before this are dropped
+        self._last_backup_time = 0.0  # epoch seconds of last auto-backup
 
     def pause(self) -> None:
         """Suppress all events until resume() is called.
@@ -67,6 +70,10 @@ class SaveWatcher(FileSystemEventHandler):
             self._timer.start()
 
     def _do_backup(self) -> None:
+        # Enforce cooldown: skip if the last auto-backup was too recent.
+        now = time.time()
+        if now - self._last_backup_time < self.backup_cooldown_seconds:
+            return
         try:
             backup = create_backup(self.save.game_mode, self.save.name)
             # Mark as auto-backup by creating a new record with auto=True
@@ -79,6 +86,7 @@ class SaveWatcher(FileSystemEventHandler):
                 auto=True,
             )
             self._backups.append(backup)
+            self._last_backup_time = now
             if self.on_backup:
                 self.on_backup(backup)
         except Exception as e:
@@ -118,11 +126,11 @@ class WatcherManager:
             self._observer.join(timeout=5)
             self._running = False
 
-    def watch(self, save: SaveGame, debounce_seconds: float = 5.0) -> SaveWatcher:
+    def watch(self, save: SaveGame, debounce_seconds: float = 5.0, backup_cooldown_seconds: float = 300.0) -> SaveWatcher:
         key = save.display_name
         if key in self._watchers:
             return self._watchers[key]
-        watcher = SaveWatcher(save, debounce_seconds)
+        watcher = SaveWatcher(save, debounce_seconds, backup_cooldown_seconds)
         self._watchers[key] = watcher
         handle = self._observer.schedule(watcher, str(save.path), recursive=True)
         self._watches[key] = handle

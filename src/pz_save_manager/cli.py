@@ -165,6 +165,8 @@ def config_command(key: str | None, value: str | None) -> None:
     # Convert types
     if key == "debounce_seconds":
         value = float(value)  # type: ignore
+    elif key == "backup_cooldown_minutes":
+        value = int(value)  # type: ignore
     elif key == "port":
         value = int(value)  # type: ignore
     elif key in ("auto_start_watcher",):
