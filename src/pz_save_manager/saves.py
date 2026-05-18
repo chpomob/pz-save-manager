@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -74,19 +75,70 @@ def list_saves(saves_root: Path | str | None = None) -> list[SaveGame]:
             continue
         for save_dir in mode_dir.iterdir():
             if save_dir.is_dir() and not save_dir.name.startswith("."):
-                saves.append(SaveGame(mode_dir.name, save_dir.name, save_dir))
+                if not _is_multiplayer(save_dir.name):
+                    saves.append(SaveGame(mode_dir.name, save_dir.name, save_dir))
 
-    return sorted(saves, key=lambda save: (save.game_mode.casefold(), save.name.casefold()))
+    # Most recently modified first; tied saves fall back to alphabetical order.
+    return sorted(saves, key=lambda save: (-get_save_modified_time(save),
+                                             save.game_mode.casefold(),
+                                             save.name.casefold()))
+
+
+_MULTIPLAYER_RE = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}_')
+
+
+def _is_multiplayer(name: str) -> bool:
+    """Return True if the save name matches a server address (multiplayer save)."""
+    return bool(_MULTIPLAYER_RE.match(name))
 
 
 def get_save(game_mode: str, save_name: str, saves_root: Path | str | None = None) -> SaveGame:
     """Return a specific save or raise SaveNotFound."""
     # P0: prevent path traversal — reject '..' and '/' in components
     for val, label in ((game_mode, "game_mode"), (save_name, "save_name")):
-        if ".." in val or "/" in val or "\\" in val:
+        if ".." in val or "/" in val or "\\\\" in val:
             raise SaveNotFound(f"Invalid {label}: {val!r}")
     root = _to_root(saves_root)
     path = root / game_mode / save_name
     if not path.is_dir():
         raise SaveNotFound(f"Save not found: {game_mode}/{save_name}")
     return SaveGame(game_mode, save_name, path)
+
+
+_SANE_NAME_RE = re.compile(r'^[^/\x00]{1,200}$')
+
+
+def _validate_name(value: str, label: str) -> None:
+    """Reject empty, path-traversal, IP-shaped, or otherwise dangerous names."""
+    if not value or not value.strip():
+        raise SaveManagerError(f"{label} cannot be empty")
+    if ".." in value or "/" in value or "\\\\" in value:
+        raise SaveManagerError(f"Invalid {label}: {value!r}")
+    if _is_multiplayer(value.strip()):
+        raise SaveManagerError(f"{label} looks like a server address: {value!r}")
+    if not _SANE_NAME_RE.match(value):
+        raise SaveManagerError(f"Invalid characters in {label}: {value!r}")
+    if len(value.strip()) > 200:
+        raise SaveManagerError(f"{label} is too long (max 200 characters)")
+
+
+def rename_save(
+    game_mode: str,
+    old_name: str,
+    new_name: str,
+    *,
+    saves_root: Path | str | None = None,
+) -> SaveGame:
+    """Rename a save directory. Raises SaveManagerError on invalid names or conflicts."""
+    _validate_name(game_mode, "game_mode")
+    _validate_name(old_name, "old_name")
+    _validate_name(new_name, "new_name")
+
+    old = get_save(game_mode, old_name, saves_root=saves_root)
+    root = _to_root(saves_root)
+    new_path = root / game_mode / new_name.strip()
+    if new_path.exists():
+        raise SaveManagerError(f"A save named {new_name!r} already exists in {game_mode}")
+
+    old.path.rename(new_path)
+    return SaveGame(game_mode, new_name.strip(), new_path)

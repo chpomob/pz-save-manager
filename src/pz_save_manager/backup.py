@@ -75,6 +75,42 @@ class BackupRecord:
             return f"{weeks}w ago"
         return dt.strftime("%d/%m/%Y")
 
+    @property
+    def note(self) -> str | None:
+        """User annotation stored alongside the backup (read lazily)."""
+        return get_backup_note(self.path)
+
+    def set_note(self, text: str) -> None:
+        """Annotate this backup. Pass empty string to remove the note."""
+        set_backup_note(self.path, text)
+
+
+_NOTE_FILE = ".pz-note"
+
+
+def get_backup_note(backup_path: Path) -> str | None:
+    """Read the annotation for a backup, or None."""
+    note_file = backup_path / _NOTE_FILE
+    if not note_file.is_file():
+        return None
+    try:
+        return note_file.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def set_backup_note(backup_path: Path, text: str) -> None:
+    """Write or remove an annotation for a backup."""
+    note_file = backup_path / _NOTE_FILE
+    text = text.strip()
+    if not text:
+        try:
+            note_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+    note_file.write_text(text, encoding="utf-8")
+
 
 def _root(path: Path | str | None, default: Path) -> Path:
     return Path(path).expanduser() if path is not None else default
@@ -249,3 +285,37 @@ def delete_backup(
     except OSError as exc:
         raise BackupError(f"Could not delete backup: {exc}") from exc
     return backup
+
+
+def rename_backups_for_save(
+    game_mode: str,
+    old_save_name: str,
+    new_save_name: str,
+    *,
+    backups_root: Path | str | None = None,
+) -> int:
+    """Move all backups from old_save_name to new_save_name under game_mode.
+
+    Returns the number of backups moved.  If no backups exist for the old
+    name this is a no-op (returns 0).  Raises BackupError if the new name
+    already has backups (to avoid silently merging two histories).
+    """
+    _validate_component(game_mode, "game mode")
+    _validate_component(old_save_name, "old save name")
+    _validate_component(new_save_name, "new save name")
+
+    root = _root(backups_root, get_backups_root())
+    old_dir = root / game_mode / old_save_name
+    new_dir = root / game_mode / new_save_name
+
+    if not old_dir.is_dir():
+        return 0
+    if new_dir.exists():
+        raise BackupError(
+            f"Cannot rename backups: {new_save_name!r} already has backups in {game_mode}"
+        )
+
+    # Count backups before moving
+    count = sum(1 for _ in old_dir.iterdir() if _.is_dir())
+    old_dir.rename(new_dir)
+    return count

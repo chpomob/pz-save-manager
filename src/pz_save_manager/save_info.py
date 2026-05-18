@@ -245,3 +245,31 @@ def extract_all(save_path: Path) -> dict:
         info["map_zoom"] = pos["zoom"]
 
     return info
+
+
+# ── World version → Build mapping ─────────────────────────────────────
+#
+# The world version is bumped by the PZ devs whenever the save-file format
+# changes.  It does NOT change on every patch, so multiple minor builds
+# share the same world version.  The breakpoints below are from community
+# knowledge and the pzdataspec project.
+
+# fmt: off
+_WORLD_VERSION_BUILD: list[tuple[range, str]] = [
+    (range(0,   160),   "Build 40 or earlier"),
+    (range(160, 196),   "Build 41"),
+    (range(196, 210),   "Build 41 (late)"),
+    (range(210, 241),   "Build 41/42 transition"),
+    (range(241, 246),   "Build 42 (early)"),
+    (range(246, 300),   "Build 42"),
+    (range(300, 9999),  "Build 42+"),
+]
+# fmt: on
+
+
+def world_version_to_build(world_version: int) -> str:
+    """Map a PZ world version number to a human-readable build string."""
+    for rng, label in _WORLD_VERSION_BUILD:
+        if world_version in rng:
+            return label
+    return f"Build ? (world v{world_version})"

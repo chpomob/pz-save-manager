@@ -167,13 +167,56 @@ def config_command(key: str | None, value: str | None) -> None:
         value = float(value)  # type: ignore
     elif key == "port":
         value = int(value)  # type: ignore
-    elif key in ("auto_start_watcher", "streamer_mode"):
+    elif key in ("auto_start_watcher",):
         value = value.lower() in ("true", "1", "yes")  # type: ignore
     elif key == "backups_dir" and value in ("", "none", "null"):
         value = None  # type: ignore
 
     set_(key, value)
     console.print(f"[green]{key} = {value}[/green]")
+
+
+@main.command("rename")
+@click.argument("game_mode")
+@click.argument("old_name")
+@click.argument("new_name")
+@click.pass_context
+def rename_command(ctx: click.Context, game_mode: str, old_name: str, new_name: str) -> None:
+    """Rename a save (and move its backups)."""
+    from .saves import SaveManagerError, rename_save
+    from .backup import BackupError, rename_backups_for_save
+    try:
+        new_save = rename_save(game_mode, old_name, new_name, saves_root=ctx.obj["saves_root"])
+        n = rename_backups_for_save(game_mode, old_name, new_name, backups_root=ctx.obj["backups_root"])
+    except (SaveManagerError, BackupError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print(f"[green]Saved renamed to[/green] {new_save.name}")
+    if n:
+        console.print(f"[dim]{n} backup(s) moved[/dim]")
+
+
+@main.command("annotate")
+@click.argument("game_mode")
+@click.argument("save_name")
+@click.argument("timestamp")
+@click.argument("note", required=False)
+@click.pass_context
+def annotate_command(ctx: click.Context, game_mode: str, save_name: str, timestamp: str, note: str | None) -> None:
+    """Add or read a note on a backup. Omit note to read existing."""
+    from .backup import BackupNotFound, get_backup, get_backup_note, set_backup_note
+    try:
+        backup = get_backup(game_mode, save_name, timestamp, backups_root=ctx.obj["backups_root"])
+    except BackupNotFound as exc:
+        raise click.ClickException(str(exc)) from exc
+    if note is None:
+        existing = get_backup_note(backup.path)
+        if existing:
+            console.print(existing)
+        else:
+            console.print("[dim](no note)[/dim]")
+    else:
+        set_backup_note(backup.path, note)
+        console.print(f"[green]Note saved for[/green] {backup.display_name}")
 
 
 @main.command("install")

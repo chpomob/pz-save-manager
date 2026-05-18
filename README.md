@@ -90,6 +90,8 @@ the watcher waits 5 seconds (configurable), then snapshots the entire save.
 | `pz-saves list` | List all saves in the terminal |
 | `pz-saves backup <mode> <name>` | Manual backup (CLI) |
 | `pz-saves restore <mode> <name> <ts>` | Restore a backup (CLI) |
+| `pz-saves rename <mode> <old> <new>` | Rename a save (moves backups too) |
+| `pz-saves annotate <mode> <save> <ts> [note]` | Add/read a note on a backup |
 | `pz-saves config` | View/set configuration |
 | `pz-saves install` | Create desktop shortcut |
 

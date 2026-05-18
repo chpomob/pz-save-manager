@@ -17,7 +17,6 @@ DEFAULTS = {
     "debounce_seconds": 5.0,
     "auto_start_watcher": False,
     "port": 8080,
-    "streamer_mode": False,
 }
 
 

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, render_template_string, request, send_file
 
-from .backup import BackupError, BackupNotFound, create_backup, delete_backup, list_backups, restore_backup
+from .backup import BackupError, BackupNotFound, create_backup, delete_backup, get_backup, get_backup_note, list_backups, restore_backup, set_backup_note
 from .config import get_all as config_get_all, set_ as config_set
 from .platforms import get_backups_root, get_saves_root
 from .save_info import extract_all, player_info
@@ -98,14 +98,13 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 {% if save.player_x is not none %}<div class="detail-item"><strong>Position</strong> ({{save.player_x}}, {{save.player_y}})</div>{% endif %}
 {% if save.player_world_version %}<div class="detail-item"><strong>World Version</strong> {{save.player_world_version}}</div>{% endif %}
 <div class="detail-item"><strong>Modified</strong> {{save.modified}}</div>
-{% if save.vehicles is not none %}<div class="detail-item"><strong>Vehicles</strong> {{save.vehicles}}</div>{% endif %}
 {% if save.mod_count %}<div class="detail-item"><strong>Mods</strong> {{save.mod_count}}</div>{% endif %}
-{% if save.items %}<div class="detail-item"><strong>Items</strong> {{save.items}}</div>{% endif %}
 {% if save.players %}<div class="detail-item"><strong>Players</strong> {{save.players}}</div>{% endif %}
 </div>
 <div class="actions">
 <button class="btn btn-accent" onclick='event.stopPropagation();backup({{save.game_mode|tojson}},{{save.full_name|tojson}},this)'>💾 Backup</button>
 <button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick='event.stopPropagation();toggleWatch({{save.game_mode|tojson}},{{save.full_name|tojson}},this)'>{{'⏸ Unwatch' if save.watched else '👁 Watch'}}</button>
+<button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick='event.stopPropagation();renameSave({{save.game_mode|tojson}},{{save.full_name|tojson}},this)'>✏️ Rename</button>
 </div>
 </div>
 </div>
@@ -143,9 +142,11 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 <div class="detail-item"><strong>Type</strong> {% if b.auto %}🤖 Automatic{% else %}✋ Manual{% endif %}</div>
 <div class="detail-item"><strong>Save</strong> {{b.game_mode}} / {{b.save_name[:30]}}</div>
 </div>
+{% if b.note %}<div style="background:rgba(233,69,96,.08);border-left:3px solid var(--accent);padding:.5rem .8rem;margin-bottom:.6rem;border-radius:4px;font-size:.78rem;color:var(--text);max-height:80px;overflow-y:auto;white-space:pre-wrap;word-break:break-word">{{b.note}}</div>{% endif %}
 <div class="actions">
 <button class="btn btn-green" onclick='event.stopPropagation();restore({{b.game_mode|tojson}},{{b.real_save_name|tojson}},{{b.timestamp|tojson}},this)'>↩ Restore</button>
 <button class="btn btn-red btn-sm" onclick='event.stopPropagation();deleteBackup({{b.game_mode|tojson}},{{b.real_save_name|tojson}},{{b.timestamp|tojson}},this)'>🗑 Delete</button>
+<button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick='event.stopPropagation();annotate({{b.game_mode|tojson}},{{b.real_save_name|tojson}},{{b.timestamp|tojson}},this)'>📝 Note</button>
 </div>
 </div>
 </div>
@@ -159,7 +160,6 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 <input id="cfg-backups-dir" style="width:100%;padding:.5rem;margin-top:.3rem;background:var(--bg);border:1px solid var(--accent2);color:var(--text);border-radius:6px" placeholder="Default: ~/.pz-save-manager/backups"></div>
 <div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted)">Auto-backup delay (seconds)</label>
 <input id="cfg-debounce" type="number" step="1" min="1" max="60" style="width:100%;padding:.5rem;margin-top:.3rem;background:var(--bg);border:1px solid var(--accent2);color:var(--text);border-radius:6px"></div>
-<div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted);display:flex;align-items:center;gap:.5rem"><input id="cfg-streamer" type="checkbox" style="accent-color:var(--accent)"> Streamer mode (hide IPs)</label></div>
 <div style="display:flex;gap:.5rem;justify-content:flex-end">
 <button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick="toggleSettings()">Cancel</button>
 <button class="btn btn-sm btn-green" onclick="saveSettings()">Save</button>
@@ -180,19 +180,17 @@ function backup(m,n,b){doAction(b,'/api/backup',{game_mode:m,save_name:n},'Backu
 function restore(m,n,t,b){if(!confirm('Restore '+m+'/'+n+' from '+t+'?'))return;doAction(b,'/api/restore',{game_mode:m,save_name:n,timestamp:t},'Restored!')}
 function deleteBackup(m,n,t,b){if(!confirm('Delete backup '+t+'?'))return;doAction(b,'/api/backup/delete',{game_mode:m,save_name:n,timestamp:t},'Deleted!')}
 function toggleWatcher(){doAction(null,'/api/watcher/toggle',null)}
+function renameSave(m,n,b){var name=prompt('New name for '+n+':');if(!name||name.trim()===''||name.trim()===n)return;doAction(b,'/api/save/rename',{game_mode:m,old_name:n,new_name:name.trim()},'Renamed to '+name.trim()+'!')}
+function annotate(m,n,t,b){var note=prompt('Note for '+t+' (empty to remove):');if(note===null)return;doAction(b,'/api/backup/annotate',{game_mode:m,save_name:n,timestamp:t,note:note},note?'Note saved':'Note removed')}
 function toggleWatch(m,n,b){doAction(b,'/api/watcher/save',{game_mode:m,save_name:n})}
-function toggleSettings(){var o=document.getElementById('settings-overlay');if(o.style.display==='flex'){o.style.display='none'}else{o.style.display='flex';api('GET','/api/config').then(r=>r.json()).then(d=>{document.getElementById('cfg-backups-dir').value=d.backups_dir||'';document.getElementById('cfg-debounce').value=d.debounce_seconds;document.getElementById('cfg-streamer').checked=d.streamer_mode})}}
-function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,debounce_seconds:document.getElementById('cfg-debounce').value,streamer_mode:document.getElementById('cfg-streamer').checked};doAction(null,'/api/config',data,'Settings saved!')}
+function toggleSettings(){var o=document.getElementById('settings-overlay');if(o.style.display==='flex'){o.style.display='none'}else{o.style.display='flex';api('GET','/api/config').then(r=>r.json()).then(d=>{document.getElementById('cfg-backups-dir').value=d.backups_dir||'';document.getElementById('cfg-debounce').value=d.debounce_seconds})}}
+function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,debounce_seconds:document.getElementById('cfg-debounce').value};doAction(null,'/api/config',data,'Settings saved!')}
 function shutdown(){if(!confirm('Close PZ Save Manager?'))return;api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style="text-align:center;padding:4rem;color:#888"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'}).catch(function(){toast('Network error','var(--red)')})}
 </script>
 </body>
 </html>"""
 
 
-def _censor(name: str) -> str:
-    """Mask IPv4 addresses in display names."""
-    import re
-    return re.sub(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(_\d+)?', '***.***.***.***', name)
 
 
 def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
@@ -210,7 +208,7 @@ def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
         } for b in backups[:5]],
         "watched": save.display_name in manager.watched_saves(),
     }
-    for k in ("vehicles", "players", "items", "map_pos", "map_name", "mod_count",
+    for k in ("players", "map_pos", "map_name", "mod_count",
               "player", "player_dead", "player_x", "player_y", "player_world_version"):
         if k in extra:
             info[k] = extra[k]
@@ -231,7 +229,6 @@ def index():
                 import logging
                 logging.getLogger(__name__).warning("could not read save %s", s.display_name, exc_info=True)
         all_backups = list_backups()
-        streamer = config_get_all().get("streamer_mode", False)
         all_b = []
         for b in all_backups:
             # Only player_dead is used in the card; reading just players.db is
@@ -239,17 +236,15 @@ def index():
             # also have b.size_mb / b.file_count properties that rglob — skip
             # those in the list view, surface them lazily if/when needed.
             pi = player_info(b.path) or {}
-            display_name = _censor(b.save_name) if streamer else b.save_name
+            display_name = b.save_name
             all_b.append({
                 "game_mode": b.game_mode, "save_name": display_name, "real_save_name": b.save_name,
                 "timestamp": b.timestamp, "auto": b.auto, "age": b.age,
                 "has_thumbnail": (b.path / "thumb.png").is_file(),
                 "player": pi.get("name"),
                 "player_dead": pi.get("is_dead"),
+                "note": get_backup_note(b.path),
             })
-        if streamer:
-            for info in save_infos:
-                info["name"] = _censor(info["full_name"])[:24]
         return render_template_string(PAGE, saves=save_infos, all_backups=all_b, watcher_running=manager.running)
     except Exception:
         import traceback
@@ -382,6 +377,45 @@ def api_delete_backup():
         return jsonify({"ok": False, "error": str(e)}), 400
 
 
+@app.route("/api/save/rename", methods=["POST"])
+def api_rename_save():
+    data, err = _need(request.get_json(silent=True), "game_mode", "old_name", "new_name")
+    if err:
+        return err
+    from .saves import SaveManagerError, rename_save
+    from .backup import rename_backups_for_save
+    manager = get_manager()
+    try:
+        # Resolve the save before renaming so we can pause the watcher
+        from .saves import get_save
+        live_save = get_save(data["game_mode"], data["old_name"])
+        with manager.pause_for(live_save):
+            new_save = rename_save(data["game_mode"], data["old_name"], data["new_name"])
+            # Move backups alongside
+            n = rename_backups_for_save(data["game_mode"], data["old_name"], data["new_name"])
+            # Update watcher if the old name was watched
+            if live_save.display_name in manager.watched_saves():
+                manager.unwatch(live_save)
+                manager.watch(new_save)
+    except (SaveManagerError, BackupError, SaveNotFound) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    return jsonify({"ok": True, "message": f"Save renamed to {data['new_name']}", "backups_moved": n})
+
+
+@app.route("/api/backup/annotate", methods=["POST"])
+def api_annotate_backup():
+    data, err = _need(request.get_json(silent=True), "game_mode", "save_name", "timestamp")
+    if err:
+        return err
+    note = (data or {}).get("note", "")
+    try:
+        backup = get_backup(data["game_mode"], data["save_name"], data["timestamp"])
+        set_backup_note(backup.path, note)
+    except (BackupNotFound, BackupError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    return jsonify({"ok": True, "message": "Note saved" if note else "Note removed"})
+
+
 @app.route("/api/watcher/toggle", methods=["POST"])
 def api_watcher_toggle():
     manager = get_manager()
@@ -433,7 +467,7 @@ def api_config():
                 value = float(value)
             elif key == "port":
                 value = int(value)
-            elif key in ("auto_start_watcher", "streamer_mode"):
+            elif key in ("auto_start_watcher"):
                 if not isinstance(value, bool):
                     value = str(value).lower() in ("true", "1", "yes")
             config_set(key, value)
