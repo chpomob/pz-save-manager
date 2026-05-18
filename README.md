@@ -33,23 +33,21 @@ clean web interface.
 
 ## Quick Start
 
-### Windows
+### Windows — prebuilt .exe (recommended)
 
-**Prerequisite — install Python from python.org (not the Microsoft Store):**
+No Python install needed:
 
-1. Download Python 3.10+ from <https://www.python.org/downloads/>
-2. During install, **tick the "Add python.exe to PATH" checkbox** (it's off by default)
-3. Verify in a new `cmd` window: `py -3 --version` should print a version
+1. Go to [Releases](https://github.com/chpomob/pz-save-manager/releases/latest)
+2. Download `pz-save-manager.exe`
+3. Double-click — the web UI opens in your browser → done!
 
-> **Why not the Store version?** Windows ships a `python` stub that opens the Microsoft Store instead of running Python. It can't create virtual environments and breaks the launcher. If you've used it before, disable the alias in *Paramètres → Applications → Paramètres avancés des applications → Alias d'exécution d'application* (toggle off `python.exe` and `python3.exe`).
+> First launch may take a few seconds (the exe unpacks itself). Windows SmartScreen may warn about an unsigned binary — click "More info" → "Run anyway".
 
-**Then launch the app:**
+### Windows — from source
 
-1. Download and extract the project
-2. Double-click `launcher.bat` — first run installs dependencies, next runs are instant
-3. The web UI opens in your browser → done!
+Use this only if you want to modify the code. Requires Python 3.10+ from <https://www.python.org/downloads/> (**not** the Microsoft Store — that's a stub that can't create virtual environments). During install, tick **"Add python.exe to PATH"**. Then download/clone the project, double-click `launcher.bat`, and the first run installs dependencies automatically.
 
-If you previously ran the launcher with a broken Python install, delete the `.venv` folder in the project directory before retrying.
+If a previous run left a broken `.venv` folder, delete it before retrying.
 
 ### Linux / macOS
 
