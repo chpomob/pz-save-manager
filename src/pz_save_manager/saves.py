@@ -75,7 +75,7 @@ def list_saves(saves_root: Path | str | None = None) -> list[SaveGame]:
             continue
         for save_dir in mode_dir.iterdir():
             if save_dir.is_dir() and not save_dir.name.startswith("."):
-                if not _is_multiplayer(save_dir.name):
+                if not _should_skip(save_dir.name):
                     saves.append(SaveGame(mode_dir.name, save_dir.name, save_dir))
 
     # Most recently modified first; tied saves fall back to alphabetical order.
@@ -85,11 +85,29 @@ def list_saves(saves_root: Path | str | None = None) -> list[SaveGame]:
 
 
 _MULTIPLAYER_RE = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}_')
+# Multiplayer saves created when joining a named server (e.g. "MyServer_player")
+_MP_PLAYER_SUFFIX_RE = re.compile(r'_player$', re.IGNORECASE)
+# Crash-recovery auto-saves created by PZ after a crash (ARK_..._crash_crash...)
+_CRASH_SUFFIX_RE = re.compile(r'_crash(_crash)*$', re.IGNORECASE)
 
 
 def _is_multiplayer(name: str) -> bool:
     """Return True if the save name matches a server address (multiplayer save)."""
     return bool(_MULTIPLAYER_RE.match(name))
+
+
+def _should_skip(name: str) -> bool:
+    """Return True for auto-generated saves that should be hidden.
+    
+    Excludes:
+    - Multiplayer saves (IP-prefixed or _player suffix)
+    - Crash-recovery auto-saves (_crash suffix)
+    """
+    return (
+        _MULTIPLAYER_RE.match(name)
+        or _MP_PLAYER_SUFFIX_RE.search(name)
+        or _CRASH_SUFFIX_RE.search(name)
+    )
 
 
 def get_save(game_mode: str, save_name: str, saves_root: Path | str | None = None) -> SaveGame:

@@ -34,16 +34,28 @@ def test_get_save_raises_for_missing_save(tmp_path):
 
 
 def test_multiplayer_saves_are_excluded(tmp_path):
-    """IP-named saves (multiplayer) should not appear in listings."""
-    make_save(tmp_path, "Sandbox", "My World")          # singleplayer → included
-    make_save(tmp_path, "Sandbox", "127.0.0.1_16261")   # multiplayer → excluded
-    make_save(tmp_path, "Apocalypse", "10.0.0.1_12345") # multiplayer → excluded
-    make_save(tmp_path, "Multiplayer", "149.202.88.99_16361_cebb5ff9105b2cb")  # excluded
+    """IP-named and _player-suffixed saves should not appear in listings."""
+    make_save(tmp_path, "Sandbox", "My World")                 # singleplayer → included
+    make_save(tmp_path, "Sandbox", "127.0.0.1_16261")          # IP → excluded
+    make_save(tmp_path, "Apocalypse", "10.0.0.1_12345")        # IP → excluded
+    make_save(tmp_path, "Multiplayer", "Crapventure_player")   # _player suffix → excluded
+    make_save(tmp_path, "Multiplayer", "MyServer_Player")      # case insensitive → excluded
 
     saves = list_saves(tmp_path)
     names = {(s.game_mode, s.name) for s in saves}
     assert names == {("Sandbox", "My World")}
     assert len(saves) == 1
+
+
+def test_crash_saves_are_excluded(tmp_path):
+    """_crash and _crash_crash saves should be hidden."""
+    make_save(tmp_path, "Sandbox", "My World")                 # normal → included
+    make_save(tmp_path, "Sandbox", "My World_crash")            # crash → excluded
+    make_save(tmp_path, "Sandbox", "ARK_2026_crash_crash")     # double crash → excluded
+
+    saves = list_saves(tmp_path)
+    assert len(saves) == 1
+    assert saves[0].name == "My World"
 
 
 def test_get_save_rejects_single_backslash(tmp_path):
