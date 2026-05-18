@@ -117,7 +117,7 @@ def _root(path: Path | str | None, default: Path) -> Path:
 
 
 def _validate_component(value: str, label: str) -> None:
-    if value in {"", ".", ".."} or "/" in value or chr(92) in value:
+    if value in {"", ".", ".."} or "/" in value or chr(92) in value or "\x00" in value:
         raise BackupError(f"Invalid {label}: {value!r}")
 
 

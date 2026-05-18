@@ -94,9 +94,9 @@ def _is_multiplayer(name: str) -> bool:
 
 def get_save(game_mode: str, save_name: str, saves_root: Path | str | None = None) -> SaveGame:
     """Return a specific save or raise SaveNotFound."""
-    # P0: prevent path traversal — reject '..' and '/' in components
+    # P0: prevent path traversal — reject '..', '/', '\\' and null bytes in components
     for val, label in ((game_mode, "game_mode"), (save_name, "save_name")):
-        if ".." in val or "/" in val or "\\\\" in val:
+        if ".." in val or "/" in val or "\\" in val or "\x00" in val:
             raise SaveNotFound(f"Invalid {label}: {val!r}")
     root = _to_root(saves_root)
     path = root / game_mode / save_name
@@ -112,7 +112,7 @@ def _validate_name(value: str, label: str) -> None:
     """Reject empty, path-traversal, IP-shaped, or otherwise dangerous names."""
     if not value or not value.strip():
         raise SaveManagerError(f"{label} cannot be empty")
-    if ".." in value or "/" in value or "\\\\" in value:
+    if ".." in value or "/" in value or "\\" in value or "\x00" in value:
         raise SaveManagerError(f"Invalid {label}: {value!r}")
     if _is_multiplayer(value.strip()):
         raise SaveManagerError(f"{label} looks like a server address: {value!r}")

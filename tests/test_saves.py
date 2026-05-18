@@ -44,3 +44,17 @@ def test_multiplayer_saves_are_excluded(tmp_path):
     names = {(s.game_mode, s.name) for s in saves}
     assert names == {("Sandbox", "My World")}
     assert len(saves) == 1
+
+
+def test_get_save_rejects_single_backslash(tmp_path):
+    """Single backslash (Windows path separator) must be rejected."""
+    with pytest.raises(SaveNotFound):
+        get_save("game\\mode", "World", saves_root=tmp_path)
+    with pytest.raises(SaveNotFound):
+        get_save("Sandbox", "world\\..\\secret", saves_root=tmp_path)
+
+
+def test_get_save_rejects_null_byte(tmp_path):
+    """Null bytes must be rejected (C-level truncation risk)."""
+    with pytest.raises(SaveNotFound):
+        get_save("Sandbox", "world\x00hidden", saves_root=tmp_path)
