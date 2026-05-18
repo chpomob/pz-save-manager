@@ -226,15 +226,9 @@ def extract_all(save_path: Path) -> dict:
         info["mods"] = mods
         info["mod_count"] = len(mods)
 
-    crafted = crafted_objects(save_path)
-    if crafted is not None:
-        info["crafted"] = crafted
-
-    wd = parse_world_dictionary(save_path)
-    if wd:
-        info["items_total"] = wd["total"]
-        info["items_vanilla"] = wd["vanilla"]
-        info["items_modded"] = wd["modded"]
+    # crafted_objects and parse_world_dictionary read multi-megabyte .lua
+    # files; their output isn't displayed anywhere in the GUI. Skipped on
+    # the hot path. Call those functions directly if you need the data.
 
     v = count_vehicles(save_path)
     if v is not None:

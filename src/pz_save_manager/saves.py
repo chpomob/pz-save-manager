@@ -33,11 +33,19 @@ def _to_root(saves_root: Path | str | None) -> Path:
 
 
 def get_save_modified_time(save: SaveGame) -> float:
-    """Return the newest modification time inside a save directory."""
+    """Return a representative modification time for the save (fast, no rglob).
+
+    A full rglob is O(files) — PZ saves contain thousands of map chunks, and
+    on Windows with real-time AV, walking the tree can take minutes per save.
+    Sampling the save dir + the files PZ actually writes to is O(1) and gives
+    the same answer for any normal play session.
+    """
     latest = save.path.stat().st_mtime
-    for child in save.path.rglob("*"):
+    for name in ("sandbox.lua", "players.db", "vehicles.db", "map_ver.bin", "map"):
         try:
-            latest = max(latest, child.stat().st_mtime)
+            t = (save.path / name).stat().st_mtime
+            if t > latest:
+                latest = t
         except OSError:
             continue
     return latest

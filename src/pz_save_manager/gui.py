@@ -97,12 +97,9 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 {% if save.player %}<div class="detail-item"><strong>Player</strong> {{save.player}}</div>{% endif %}
 {% if save.player_x is not none %}<div class="detail-item"><strong>Position</strong> ({{save.player_x}}, {{save.player_y}})</div>{% endif %}
 {% if save.player_world_version %}<div class="detail-item"><strong>World Version</strong> {{save.player_world_version}}</div>{% endif %}
-<div class="detail-item"><strong>Files</strong> {{save.file_count}}</div>
-<div class="detail-item"><strong>Size</strong> {{save.size_mb}} MB</div>
 <div class="detail-item"><strong>Modified</strong> {{save.modified}}</div>
 {% if save.vehicles is not none %}<div class="detail-item"><strong>Vehicles</strong> {{save.vehicles}}</div>{% endif %}
-{% if save.chunks is not none %}<div class="detail-item"><strong>Chunks loaded</strong> {{save.chunks}}</div>{% endif %}
-{% if save.mod_count %}<div class="detail-item"><strong>Mods</strong> {{save.mod_count}}{% endif %}
+{% if save.mod_count %}<div class="detail-item"><strong>Mods</strong> {{save.mod_count}}</div>{% endif %}
 {% if save.items %}<div class="detail-item"><strong>Items</strong> {{save.items}}</div>{% endif %}
 {% if save.players %}<div class="detail-item"><strong>Players</strong> {{save.players}}</div>{% endif %}
 </div>
@@ -132,7 +129,7 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 {% if b.has_thumbnail %}<img src="/thumb-backup/{{b.game_mode}}/{{b.real_save_name}}/{{b.timestamp}}" class="thumb" loading="lazy">{% else %}<div class="thumb"></div>{% endif %}
 <div class="info">
 <div class="name" title="{{b.timestamp}}">{{b.timestamp}}</div>
-<div class="sub">{{b.age}} · {{b.size}} · {{b.files}} fichiers{% if b.auto %} · 🤖 auto{% else %} · ✋ manuel{% endif %}</div>
+<div class="sub">{{b.age}}{% if b.auto %} · 🤖 auto{% else %} · ✋ manuel{% endif %}</div>
 </div>
 <div class="status-dot {% if b.player_dead is none %}status-unknown{% elif b.player_dead %}status-dead{% else %}status-alive{% endif %}"></div>
 <span class="arrow">▾</span>
@@ -142,8 +139,6 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 <div class="detail-item"><strong>Status</strong> {% if b.player_dead is none %}Unknown{% elif b.player_dead %}💀 Dead{% else %}🟢 Alive{% endif %}</div>
 <div class="detail-item"><strong>Timestamp</strong> {{b.timestamp}}</div>
 <div class="detail-item"><strong>Age</strong> {{b.age}}</div>
-<div class="detail-item"><strong>Size</strong> {{b.size}}</div>
-<div class="detail-item"><strong>Files</strong> {{b.files}}</div>
 <div class="detail-item"><strong>Type</strong> {% if b.auto %}🤖 Automatic{% else %}✋ Manual{% endif %}</div>
 <div class="detail-item"><strong>Save</strong> {{b.game_mode}} / {{b.save_name[:30]}}</div>
 </div>
@@ -194,25 +189,16 @@ def _censor(name: str) -> str:
 
 def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
     path = save.path
-    # Truncate display name for compact view
     short_name = save.name if len(save.name) <= 24 else save.name[:21] + "..."
-    try:
-        file_count = sum(1 for _ in path.rglob("*") if _.is_file())
-        total_size = sum(_.stat().st_size for _ in path.rglob("*") if _.is_file())
-    except OSError:
-        file_count = 0
-        total_size = 0
     modified = datetime.fromtimestamp(get_save_modified_time(save)).strftime("%Y-%m-%d %H:%M")
     backups = list_backups(save.game_mode, save.name)
     extra = extract_all(path)
     info = {
         "game_mode": save.game_mode, "name": short_name, "full_name": save.name,
-        "modified": modified, "file_count": file_count,
-        "size_mb": round(total_size / (1024 * 1024), 1),
+        "modified": modified,
         "has_thumbnail": extra.get("has_thumbnail", False),
         "backups": [{"game_mode": b.game_mode, "save_name": b.save_name,
-            "timestamp": b.timestamp, "auto": b.auto,
-            "size": f"{b.size_mb} MB", "files": b.file_count, "age": b.age,
+            "timestamp": b.timestamp, "auto": b.auto, "age": b.age,
         } for b in backups[:5]],
         "watched": save.display_name in manager.watched_saves(),
     }
@@ -220,13 +206,6 @@ def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
               "player", "player_dead", "player_x", "player_y", "player_world_version"):
         if k in extra:
             info[k] = extra[k]
-    # Count map chunks loaded
-    map_dir = save.path / "map"
-    if map_dir.is_dir():
-        try:
-            info["chunks"] = sum(1 for _ in map_dir.glob("*.bin"))
-        except OSError:
-            pass
     return info
 
 
@@ -240,14 +219,18 @@ def index():
         streamer = config_get_all().get("streamer_mode", False)
         all_b = []
         for b in all_backups:
-            pi = extract_all(b.path)
+            # Only player_dead is used in the card; reading just players.db is
+            # O(1) versus extract_all which reads every metadata file. Backups
+            # also have b.size_mb / b.file_count properties that rglob — skip
+            # those in the list view, surface them lazily if/when needed.
+            from .save_info import player_info
+            pi = player_info(b.path) or {}
             display_name = _censor(b.save_name) if streamer else b.save_name
             all_b.append({
                 "game_mode": b.game_mode, "save_name": display_name, "real_save_name": b.save_name,
-                "timestamp": b.timestamp, "auto": b.auto,
-                "size": f"{b.size_mb} MB", "files": b.file_count, "age": b.age,
+                "timestamp": b.timestamp, "auto": b.auto, "age": b.age,
                 "has_thumbnail": (b.path / "thumb.png").is_file(),
-                "player_dead": pi.get("player_dead"),
+                "player_dead": pi.get("is_dead"),
             })
         if streamer:
             for info in save_infos:
