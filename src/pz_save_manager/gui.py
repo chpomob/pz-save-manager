@@ -104,8 +104,8 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 {% if save.players %}<div class="detail-item"><strong>Players</strong> {{save.players}}</div>{% endif %}
 </div>
 <div class="actions">
-<button class="btn btn-accent" onclick="event.stopPropagation();backup({{save.game_mode|tojson}},{{save.full_name|tojson}},this)">💾 Backup</button>
-<button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick="event.stopPropagation();toggleWatch({{save.game_mode|tojson}},{{save.full_name|tojson}},this)">{{'⏸ Unwatch' if save.watched else '👁 Watch'}}</button>
+<button class="btn btn-accent" onclick='event.stopPropagation();backup({{save.game_mode|tojson}},{{save.full_name|tojson}},this)'>💾 Backup</button>
+<button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick='event.stopPropagation();toggleWatch({{save.game_mode|tojson}},{{save.full_name|tojson}},this)'>{{'⏸ Unwatch' if save.watched else '👁 Watch'}}</button>
 </div>
 </div>
 </div>
@@ -143,8 +143,8 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 <div class="detail-item"><strong>Save</strong> {{b.game_mode}} / {{b.save_name[:30]}}</div>
 </div>
 <div class="actions">
-<button class="btn btn-green" onclick="event.stopPropagation();restore('{{b.game_mode}}','{{b.real_save_name}}','{{b.timestamp}}',this)">↩ Restore</button>
-<button class="btn btn-red btn-sm" onclick="event.stopPropagation();deleteBackup('{{b.game_mode}}','{{b.real_save_name}}','{{b.timestamp}}',this)">🗑 Delete</button>
+<button class="btn btn-green" onclick='event.stopPropagation();restore({{b.game_mode|tojson}},{{b.real_save_name|tojson}},{{b.timestamp|tojson}},this)'>↩ Restore</button>
+<button class="btn btn-red btn-sm" onclick='event.stopPropagation();deleteBackup({{b.game_mode|tojson}},{{b.real_save_name|tojson}},{{b.timestamp|tojson}},this)'>🗑 Delete</button>
 </div>
 </div>
 </div>
@@ -175,7 +175,7 @@ function toggleWatch(m,n,b){b.disabled=true;api('POST','/api/watcher/save',{game
 function toggleSettings(){var o=document.getElementById('settings-overlay');if(o.style.display==='flex'){o.style.display='none'}else{o.style.display='flex';api('GET','/api/config').then(r=>r.json()).then(d=>{document.getElementById('cfg-backups-dir').value=d.backups_dir||'';document.getElementById('cfg-debounce').value=d.debounce_seconds;document.getElementById('cfg-streamer').checked=d.streamer_mode})}}
 function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,debounce_seconds:document.getElementById('cfg-debounce').value,streamer_mode:document.getElementById('cfg-streamer').checked};api('POST','/api/config',data).then(r=>r.json()).then(d=>{d.ok?toast('Settings saved! Reloading...'):toast('Error','var(--red)');setTimeout(function(){location.reload()},1000)})}
 function shutdown(){if(confirm('Close PZ Save Manager?')){api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style=\\\"text-align:center;padding:4rem;color:var(--muted)\\\"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'})}}
-function deleteBackup(m,n,t,b){if(!confirm('Delete backup '+t+'?'))return;b.disabled=true;api('POST','/api/backup/delete',{game_mode:m,save_name:n,timestamp:t}).then(r=>r.json()).then(d=>{d.ok?toast('Deleted!')&&setTimeout(function(){location.reload()},800):toast(d.error,'var(--red)')})}
+function deleteBackup(m,n,t,b){if(!confirm('Delete backup '+t+'?'))return;b.disabled=true;api('POST','/api/backup/delete',{game_mode:m,save_name:n,timestamp:t}).then(r=>r.json()).then(d=>{if(d.ok){toast('Deleted!');setTimeout(function(){location.reload()},800)}else{toast(d.error,'var(--red)');b.disabled=false}})}
 </script>
 </body>
 </html>"""
