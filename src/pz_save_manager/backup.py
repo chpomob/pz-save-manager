@@ -12,6 +12,9 @@ from uuid import uuid4
 from .platforms import get_backups_root, get_saves_root
 from .saves import SaveGame, SaveManagerError, get_save
 
+INTERNAL_FILES = {".pz-note", ".pz-auto"}
+_INTERNAL_PREFIX = ".pz-"
+
 
 class BackupError(SaveManagerError):
     """Base error for backup operations."""
@@ -95,6 +98,7 @@ class BackupRecord:
 
 
 _NOTE_FILE = ".pz-note"
+_AUTO_FILE = ".pz-auto"
 
 
 def get_backup_note(backup_path: Path) -> str | None:
@@ -141,6 +145,16 @@ def _timestamp(now: datetime | None = None) -> str:
     return (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
 
 
+def _skip_symlinks_and_internal(d: str, names: list[str]) -> list[str]:
+    return [
+        name
+        for name in names
+        if (Path(d) / name).is_symlink()
+        or name in INTERNAL_FILES
+        or name.startswith(_INTERNAL_PREFIX)
+    ]
+
+
 def _unique_destination(base_dir: Path, timestamp: str) -> tuple[str, Path]:
     # P0: TOCTOU-safe — reserve via atomic mkdir, then caller copies into it
     destination = base_dir / timestamp
@@ -181,11 +195,8 @@ def create_backup(
     # P0: copy to temp inside destination, then atomically move contents
     tmp = Path(tempfile.mkdtemp(dir=destination.parent, prefix=f".tmp-{timestamp}-"))
     try:
-        # P0: skip symlinks entirely (security)
-        def _skip_symlinks(d, names):
-            return [n for n in names if (Path(d)/n).is_symlink()]
         shutil.copytree(save.path, tmp, copy_function=shutil.copy2,
-                        ignore=_skip_symlinks, dirs_exist_ok=True)
+                        ignore=_skip_symlinks_and_internal, dirs_exist_ok=True)
         # Atomic: move all contents from tmp into destination
         for item in tmp.iterdir():
             shutil.move(str(item), str(destination / item.name))
@@ -196,7 +207,6 @@ def create_backup(
         shutil.rmtree(tmp, ignore_errors=True)
     # Persist auto/manual marker
     if auto:
-        _AUTO_FILE = ".pz-auto"
         try:
             (destination / _AUTO_FILE).touch()
         except OSError:
@@ -234,7 +244,7 @@ def list_backups(
                 continue
             for backup_dir in save_dir.iterdir():
                 if backup_dir.is_dir():
-                    auto = (backup_dir / ".pz-auto").is_file()
+                    auto = (backup_dir / _AUTO_FILE).is_file()
                     records.append(BackupRecord(mode_dir.name, save_dir.name, backup_dir.name, backup_dir, auto=auto))
     return sorted(
         records,
@@ -272,11 +282,8 @@ def restore_backup(
     temp_target = target.with_name(f".{target.name}.restore-{uuid4().hex}.tmp")
     previous_target = target.with_name(f".{target.name}.restore-old-{uuid4().hex}")
     try:
-        # P0: skip symlinks entirely (security: no following, no copying)
-        def _skip_symlinks(d, names):
-            return [n for n in names if (Path(d)/n).is_symlink()]
         shutil.copytree(backup.path, temp_target, copy_function=shutil.copy2,
-                        ignore=_skip_symlinks)
+                        ignore=_skip_symlinks_and_internal)
         if target.exists():
             target.rename(previous_target)
         temp_target.rename(target)
@@ -369,7 +376,7 @@ def prune_auto_backups(
     # Collect auto-backup directories with their timestamps
     autos: list[tuple[str, Path]] = []
     for item in save_dir.iterdir():
-        if item.is_dir() and (item / ".pz-auto").is_file():
+        if item.is_dir() and (item / _AUTO_FILE).is_file():
             autos.append((item.name, item))
 
     if len(autos) <= max_count:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pz_save_manager.backup import create_backup, delete_backup, list_backups, restore_backup
+from pz_save_manager.backup import create_backup, delete_backup, list_backups, restore_backup, set_backup_note
 
 
 def make_save(root, mode="Sandbox", name="WorldOne"):
@@ -42,6 +42,39 @@ def test_restore_backup_replaces_current_save(tmp_path):
     assert restored.path == saves_root / "Sandbox" / "WorldOne"
     assert (restored.path / "sandbox.lua").read_text(encoding="utf-8") == "SandboxVars = {}"
     assert not (restored.path / "new-file.txt").exists()
+
+
+def test_restore_backup_ne_copie_pas_les_sidecars_internes(tmp_path):
+    """Les marqueurs .pz-* du backup ne doivent jamais contaminer la sauvegarde live."""
+    saves_root = tmp_path / "saves"
+    backups_root = tmp_path / "backups"
+    save_dir = make_save(saves_root)
+    backup = create_backup(
+        "Sandbox",
+        "WorldOne",
+        saves_root=saves_root,
+        backups_root=backups_root,
+        now=datetime(2026, 5, 14, 10, 30, 5),
+        auto=True,
+    )
+    set_backup_note(backup.path, "Jour 12")
+    (save_dir / "sandbox.lua").write_text("changed", encoding="utf-8")
+
+    restored = restore_backup("Sandbox", "WorldOne", backup.timestamp, saves_root=saves_root, backups_root=backups_root)
+
+    assert not any(path.name.startswith(".pz-") for path in restored.path.rglob("*"))
+
+    manual = create_backup(
+        "Sandbox",
+        "WorldOne",
+        saves_root=saves_root,
+        backups_root=backups_root,
+        now=datetime(2026, 5, 14, 10, 31, 5),
+    )
+    records = list_backups("Sandbox", "WorldOne", backups_root=backups_root)
+    manual_record = next(record for record in records if record.timestamp == manual.timestamp)
+
+    assert not manual_record.auto
 
 
 def test_delete_backup_removes_backup_directory(tmp_path):
