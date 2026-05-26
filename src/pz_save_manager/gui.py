@@ -475,7 +475,7 @@ def api_config():
                 value = int(value)
             elif key == "port":
                 value = int(value)
-            elif key in ("auto_start_watcher"):
+            elif key == "auto_start_watcher":
                 if not isinstance(value, bool):
                     value = str(value).lower() in ("true", "1", "yes")
             config_set(key, value)
