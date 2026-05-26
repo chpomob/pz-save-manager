@@ -9,7 +9,7 @@ clean web interface.
 ![Python](https://img.shields.io/badge/python-3.10+-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%20|%20Linux%20|%20macOS-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-16%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-47%20passed-brightgreen)
 
 ## Features
 
@@ -111,7 +111,7 @@ git clone https://github.com/chpomob/pz-save-manager.git
 cd pz-save-manager
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest                    # 16 tests
+.venv/bin/pytest                    # 47 tests
 ```
 
 ## Tech Stack
@@ -125,3 +125,20 @@ python3 -m venv .venv
 ## License
 
 MIT — do whatever you want with it.
+
+## Changelog
+
+### v0.1.5 — 2026-05-26
+
+- **Fix**: `.pz-auto`/`.pz-note` sidecars no longer leak into live saves during restore
+- **Fix**: Rename is now safe — preflight checks backups before touching the save
+- **Fix**: Watcher timers are cancelled on stop/unwatch, preventing ghost backups
+- **Fix**: Race condition in `_do_backup()` — locked state access for cooldown/mtime
+- **Chore**: Bumped test suite from 16 → 47 tests
+- **Meta**: Full Codex review in `docs/codex-review.md`
+
+### v0.1.4 — 2026-05-18
+
+- **Fix**: Default cooldown 1min, handle `max_auto_backups=0` correctly
+- **Fix**: Use local time for backup timestamps (was UTC, causing 2h offset)
+- **Fix**: Use `os._exit(0)` as last-resort shutdown fallback
