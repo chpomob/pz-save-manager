@@ -122,6 +122,45 @@ python3 -m venv .venv
 - **Click + Rich** — CLI
 - **SQLite** — save data extraction (stdlib)
 
+## FAQ
+
+### Why isn't this a Project Zomboid mod?
+
+Short answer: **PZ's Lua modding sandbox doesn't allow file I/O.**
+
+Project Zomboid uses Kahlua, a Lua interpreter embedded in Java, which **does not implement the standard `io.*` and `os.*` modules**. This means a mod running inside PZ cannot:
+- Copy or move files and directories
+- Create or delete folders
+- List directory contents
+- Run external processes
+- Open SQLite databases
+
+All of PZ Save Manager's core features — atomic backups, file watching, metadata extraction from `players.db` — require these filesystem operations. They are simply impossible from inside the game.
+
+The few backup mods that exist on Steam Workshop (e.g. "PZ Backup Manager") use the exact same architecture as this app: a **Lua mod for in-game UI + an external Windows application** that does the actual file work.
+
+### Why not make it a mod companion instead?
+
+A small Lua mod could communicate with PZ Save Manager (e.g. via a local HTTP endpoint) to add in-game features:
+
+| Feature | Mod companion | Standalone app (current) |
+|---------|:---:|:---:|
+| Backup automation (watcher) | ❌ needs external app | ✅ built-in |
+| Web UI (any browser, any OS) | ❌ | ✅ Flask GUI |
+| Cross-platform (Win/Linux/Mac) | ❌ Lua only, external app Windows-only in practice | ✅ Python |
+| CLI automation (scripts, cron) | ❌ | ✅ Click CLI |
+| Testability / CI | ❌ needs game running | ✅ pytest |
+| You can modify / extend it | ❌ needs Lua + Java decompile | ✅ Python |
+| In-game notifications | ✅ | ❌ |
+| Hotkey to trigger backup | ✅ (with companion app) | ❌ |
+| Auto-backup on player death | ✅ (with companion app) | ❌ (watcher only) |
+
+The standalone approach is **more powerful, cross-platform, testable, and maintainable**. An optional mod companion could be added later for in-game convenience (hotkeys, notifications), but the core — backup, restore, metadata, web UI — will always live outside the game sandbox.
+
+### So how do I use it with PZ?
+
+You don't need to do anything special. PZ Save Manager runs **alongside** the game — launch it before playing, and it watches your save directory automatically. No mod installation, no Steam Workshop, no game file modifications. It works with any PZ build, any mod setup, multiplayer included.
+
 ## License
 
 MIT — do whatever you want with it.
