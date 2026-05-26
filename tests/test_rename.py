@@ -9,6 +9,7 @@ from pz_save_manager.backup import (
     BackupRecord,
     create_backup,
     get_backup_note,
+    preflight_rename,
     prune_auto_backups,
     rename_backups_for_save,
     set_backup_note,
@@ -124,6 +125,27 @@ def test_rename_backups_rejects_collision(tmp_path):
 
     with pytest.raises(BackupError, match="Cannot rename"):
         rename_backups_for_save("Apocalypse", "Alpha", "Bravo", backups_root=backups)
+
+
+def test_preflight_rename_bloque_la_collision_avant_de_renommer_la_save(tmp_path):
+    """Une collision de backups doit laisser la sauvegarde et ses backups sous leur nom original."""
+    saves = tmp_path / "saves"
+    backups = tmp_path / "backups"
+    for name in ("Alpha", "Bravo"):
+        sd = saves / "Apocalypse" / name
+        sd.mkdir(parents=True)
+        (sd / "map.bin").write_text(name, encoding="utf-8")
+        create_backup("Apocalypse", name, saves_root=saves, backups_root=backups)
+
+    with pytest.raises(BackupError, match="already has backups"):
+        preflight_rename("Apocalypse", "Alpha", "Bravo", backups_root=backups)
+        rename_save("Apocalypse", "Alpha", "Bravo", saves_root=saves)
+        rename_backups_for_save("Apocalypse", "Alpha", "Bravo", backups_root=backups)
+
+    assert (saves / "Apocalypse" / "Alpha").is_dir()
+    assert (saves / "Apocalypse" / "Alpha" / "map.bin").read_text(encoding="utf-8") == "Alpha"
+    assert (backups / "Apocalypse" / "Alpha").is_dir()
+    assert (backups / "Apocalypse" / "Bravo").is_dir()
 
 
 # ── Annotation tests ──────────────────────────────────────────────────

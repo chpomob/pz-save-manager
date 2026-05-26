@@ -319,6 +319,26 @@ def delete_backup(
     return backup
 
 
+def preflight_rename(
+    game_mode: str,
+    old_save_name: str,
+    new_save_name: str,
+    *,
+    backups_root: Path | str | None = None,
+) -> None:
+    """Validate backup-side rename constraints before renaming the live save."""
+    _validate_component(game_mode, "game mode")
+    _validate_component(old_save_name, "old save name")
+    normalized_new_name = new_save_name.strip()
+    _validate_component(normalized_new_name, "new save name")
+
+    root = _root(backups_root, get_backups_root())
+    old_dir = root / game_mode / old_save_name
+    new_dir = root / game_mode / normalized_new_name
+    if new_dir != old_dir and new_dir.is_dir():
+        raise BackupError(f"Cannot rename backups: {normalized_new_name!r} already has backups")
+
+
 def rename_backups_for_save(
     game_mode: str,
     old_save_name: str,

@@ -385,9 +385,10 @@ def api_rename_save():
     if err:
         return err
     from .saves import SaveManagerError, rename_save
-    from .backup import rename_backups_for_save
+    from .backup import preflight_rename, rename_backups_for_save
     manager = get_manager()
     try:
+        preflight_rename(data["game_mode"], data["old_name"], data["new_name"])
         # Resolve the save before renaming so we can pause the watcher
         from .saves import get_save
         live_save = get_save(data["game_mode"], data["old_name"])

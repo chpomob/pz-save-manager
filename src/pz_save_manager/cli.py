@@ -188,8 +188,9 @@ def config_command(key: str | None, value: str | None) -> None:
 def rename_command(ctx: click.Context, game_mode: str, old_name: str, new_name: str) -> None:
     """Rename a save (and move its backups)."""
     from .saves import SaveManagerError, rename_save
-    from .backup import BackupError, rename_backups_for_save
+    from .backup import BackupError, preflight_rename, rename_backups_for_save
     try:
+        preflight_rename(game_mode, old_name, new_name, backups_root=ctx.obj["backups_root"])
         new_save = rename_save(game_mode, old_name, new_name, saves_root=ctx.obj["saves_root"])
         n = rename_backups_for_save(game_mode, old_name, new_name, backups_root=ctx.obj["backups_root"])
     except (SaveManagerError, BackupError) as exc:
