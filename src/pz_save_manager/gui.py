@@ -321,7 +321,7 @@ def health():
         "<style>body{font-family:monospace;background:#111;color:#eee;padding:2rem}"
         "pre{white-space:pre-wrap;background:#222;padding:1rem;border-radius:6px}</style>"
         "<h2>PZ Save Manager — /health</h2>"
-        f"<pre>{json.dumps(info, indent=2, default=str)}</pre>"
+        f"<pre>{escape(json.dumps(info, indent=2, default=str))}</pre>"
     )
 
 
