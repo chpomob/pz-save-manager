@@ -9,7 +9,7 @@ clean web interface.
 ![Python](https://img.shields.io/badge/python-3.10+-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%20|%20Linux%20|%20macOS-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-47%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-62%20passed-brightgreen)
 
 ## Features
 
@@ -111,7 +111,7 @@ git clone https://github.com/chpomob/pz-save-manager.git
 cd pz-save-manager
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest                    # 47 tests
+.venv/bin/pytest                    # 62 tests
 ```
 
 ## Tech Stack
