@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from html import escape
 from pathlib import Path
 
 from flask import Flask, jsonify, render_template_string, request, send_file
@@ -260,7 +261,7 @@ def index():
             "a{color:#e94560}</style>"
             "<h2>PZ Save Manager — internal error</h2>"
             f"<p>The page failed to render. <a href='/health'>Open /health</a> for diagnostics.</p>"
-            f"<pre>{tb}</pre>",
+            f"<pre>{escape(tb)}</pre>",
             500,
         )
 
