@@ -50,6 +50,13 @@ class SaveWatcher(FileSystemEventHandler):
                 self._timer.cancel()
                 self._timer = None
 
+    def cancel_pending(self) -> None:
+        """Cancel any pending debounce backup."""
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+
     def resume(self, grace_seconds: float = 1.0) -> None:
         """Re-enable events, with a short grace window for in-flight
         watchdog events from the paused operation to drain."""
@@ -71,31 +78,37 @@ class SaveWatcher(FileSystemEventHandler):
             self._timer.start()
 
     def _do_backup(self) -> None:
-        # Enforce cooldown: skip if the last auto-backup was too recent.
         now = time.time()
-        if now - self._last_backup_time < self.backup_cooldown_seconds:
-            return
-        # Skip if the save hasn't actually changed since the last backup.
-        # On Windows, watchdog can fire on spurious events (AV, indexing,
-        # attribute changes).  We guard against this by comparing mtims.
         from .saves import get_save_modified_time
+        backup: BackupRecord | None = None
+        callback = None
         try:
-            current_mtime = get_save_modified_time(self.save)
-        except OSError:
-            return
-        if current_mtime <= self._last_backup_mtime:
-            return
-        try:
-            backup = create_backup(self.save.game_mode, self.save.name, auto=True)
-            self._backups.append(backup)
-            self._last_backup_time = now
-            self._last_backup_mtime = current_mtime
-            if self.on_backup:
-                self.on_backup(backup)
+            with self._lock:
+                self._timer = None
+                # Enforce cooldown: skip if the last auto-backup was too recent.
+                if now - self._last_backup_time < self.backup_cooldown_seconds:
+                    return
+                # Skip if the save hasn't actually changed since the last backup.
+                # On Windows, watchdog can fire on spurious events (AV, indexing,
+                # attribute changes). We guard against this by comparing mtims.
+                try:
+                    current_mtime = get_save_modified_time(self.save)
+                except OSError:
+                    return
+                if current_mtime <= self._last_backup_mtime:
+                    return
+                backup = create_backup(self.save.game_mode, self.save.name, auto=True)
+                self._backups.append(backup)
+                self._last_backup_time = now
+                self._last_backup_mtime = current_mtime
+                callback = self.on_backup
         except Exception as e:
             import logging
             logger = logging.getLogger(__name__)
             logger.error("Auto-backup failed for %s/%s: %s", self.save.game_mode, self.save.name, e, exc_info=True)
+            return
+        if backup is not None and callback:
+            callback(backup)
 
 
 class WatcherManager:
@@ -124,6 +137,8 @@ class WatcherManager:
             self._running = True
 
     def stop(self) -> None:
+        for watcher in list(self._watchers.values()):
+            watcher.cancel_pending()
         if self._running:
             self._observer.stop()
             self._observer.join(timeout=5)
@@ -145,7 +160,8 @@ class WatcherManager:
             self._observer.unschedule(self._watches[key])
             del self._watches[key]
         if key in self._watchers:
-            del self._watchers[key]
+            watcher = self._watchers.pop(key)
+            watcher.cancel_pending()
 
     def watched_saves(self) -> list[str]:
         return sorted(self._watchers.keys())

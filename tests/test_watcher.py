@@ -1,10 +1,17 @@
 """Tests for the save file watcher."""
 
+from __future__ import annotations
+
 import time
 from pathlib import Path
 
+from pz_save_manager.backup import BackupRecord
 from pz_save_manager.saves import SaveGame
 from pz_save_manager.watcher import SaveWatcher, WatcherManager
+
+
+class FakeEvent:
+    is_directory = False
 
 
 def test_save_watcher_debounce(tmp_path: Path):
@@ -14,10 +21,6 @@ def test_save_watcher_debounce(tmp_path: Path):
 
     backups = []
     watcher = SaveWatcher(save, debounce_seconds=0.05, on_backup=lambda b: backups.append(b))
-    # Simulate a file modification event
-    class FakeEvent:
-        is_directory = False
-        src_path = str(save_dir / "fake.map")
     watcher.on_modified(FakeEvent())  # type: ignore
     time.sleep(0.2)
     # Debounce timer should have fired; backup may fail in test but watcher handles it silently
@@ -43,6 +46,52 @@ def test_watcher_manager_watched_saves(tmp_path: Path):
     assert "Survivor/my-save" in manager.watched_saves()
     # Note: unwatch doesn't work with watchdog observer unless actually started
     # because schedule creates an ObservedWatch wrapper. Tested via integration.
+
+
+def test_stop_annule_le_timer_en_attente(tmp_path: Path, monkeypatch):
+    """stop() doit empêcher un backup débouncé de partir après l'arrêt."""
+    save_dir = tmp_path / "Sandbox" / "stop-save"
+    save_dir.mkdir(parents=True)
+    save = SaveGame("Sandbox", "stop-save", save_dir)
+    created = []
+
+    def fake_create_backup(game_mode: str, save_name: str, *, auto: bool = False) -> BackupRecord:
+        created.append((game_mode, save_name, auto))
+        return BackupRecord(game_mode, save_name, "20260526-120000", tmp_path / "backup", auto=auto)
+
+    monkeypatch.setattr("pz_save_manager.watcher.create_backup", fake_create_backup)
+    manager = WatcherManager()
+    watcher = manager.watch(save, debounce_seconds=0.05, backup_cooldown_seconds=0.0)
+
+    watcher.on_modified(FakeEvent())  # type: ignore
+    manager.stop()
+    time.sleep(0.1)
+
+    assert created == []
+    assert manager.get_backups(save) == []
+
+
+def test_unwatch_annule_le_timer_en_attente(tmp_path: Path, monkeypatch):
+    """unwatch() doit annuler le timer existant avant d'oublier le watcher."""
+    save_dir = tmp_path / "Sandbox" / "unwatch-save"
+    save_dir.mkdir(parents=True)
+    save = SaveGame("Sandbox", "unwatch-save", save_dir)
+    created = []
+
+    def fake_create_backup(game_mode: str, save_name: str, *, auto: bool = False) -> BackupRecord:
+        created.append((game_mode, save_name, auto))
+        return BackupRecord(game_mode, save_name, "20260526-120000", tmp_path / "backup", auto=auto)
+
+    monkeypatch.setattr("pz_save_manager.watcher.create_backup", fake_create_backup)
+    manager = WatcherManager()
+    watcher = manager.watch(save, debounce_seconds=0.05, backup_cooldown_seconds=0.0)
+
+    watcher.on_modified(FakeEvent())  # type: ignore
+    manager.unwatch(save)
+    time.sleep(0.1)
+
+    assert created == []
+    assert save.display_name not in manager.watched_saves()
 
 
 def test_pause_for_suppresses_backup_during_block(tmp_path: Path):
