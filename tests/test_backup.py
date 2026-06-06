@@ -5,6 +5,7 @@ from datetime import datetime
 import pytest
 
 from pz_save_manager.backup import (
+    BackupError,
     BackupNotFound,
     create_backup,
     delete_backup,
@@ -70,6 +71,11 @@ def test_get_backup_rejects_missing_completion_marker(tmp_path):
 
     with pytest.raises(BackupNotFound, match="missing completion marker"):
         get_backup("Sandbox", "WorldOne", "20260514-103005", backups_root=backups_root)
+
+
+def test_get_backup_invalid_component_raises_backup_error(tmp_path):
+    with pytest.raises(BackupError):
+        get_backup("Sandbox", "WorldOne", "../escape", backups_root=tmp_path)
 
 
 def test_restore_backup_replaces_current_save(tmp_path):

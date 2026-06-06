@@ -119,6 +119,12 @@ def test_map_name(tmp_path: Path) -> None:
     assert map_name(tmp_path) == "Rosewood, KY"
 
 
+def test_map_name_ascii_fallback_accepts_short_names(tmp_path: Path) -> None:
+    (tmp_path / "map_ver.bin").write_bytes(b"\x00" * 10 + b"KY4\x00")
+
+    assert map_name(tmp_path) == "KY4"
+
+
 def test_map_name_no_file(tmp_path: Path) -> None:
     assert map_name(tmp_path) is None
 

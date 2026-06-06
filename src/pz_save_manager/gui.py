@@ -123,7 +123,7 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 {% endfor %}
 </div>
 
-<h2 style="margin-top:2rem">📋 Backups ({{all_backups|length}})</h2>
+<h2 style="margin-top:2rem">📋 Backups ({{backup_count}})</h2>
 {% if not all_backups %}<div class="empty">No backups yet.</div>{% endif %}
 {% set ns = namespace(current='', open=false) %}
 {% for b in all_backups[:50] %}
@@ -164,8 +164,8 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 </div>
 {% endfor %}
 {% if ns.open %}</div>{% endif %}
-{% if all_backups|length > 50 %}
-<p style="text-align:center;color:var(--muted);font-size:.78rem;padding:.5rem">Showing 50 of {{ all_backups|length }} backups.</p>
+{% if backup_count > 50 %}
+<p style="text-align:center;color:var(--muted);font-size:.78rem;padding:.5rem">Showing 50 of {{ backup_count }} backups.</p>
 {% endif %}
 <div id="toast" class="toast" style="display:none"></div>
 <div id="settings-overlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);z-index:100;justify-content:center;align-items:center" onclick="if(event.target===this)toggleSettings()">
@@ -215,15 +215,11 @@ function shutdown(){if(!confirm('Close PZ Save Manager?'))return;api('POST','/ap
 def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
     path = save.path
     modified = datetime.fromtimestamp(get_save_modified_time(save)).strftime("%Y-%m-%d %H:%M")
-    backups = list_backups(save.game_mode, save.name)
     extra = extract_all(path)
     info = {
         "game_mode": save.game_mode, "name": save.name, "full_name": save.name,
         "modified": modified,
         "has_thumbnail": extra.get("has_thumbnail", False),
-        "backups": [{"game_mode": b.game_mode, "save_name": b.save_name,
-            "timestamp": b.timestamp, "auto": b.auto, "age": b.age, "formatted": b.formatted,
-        } for b in backups[:5]],
         "watched": save.display_name in manager.watched_saves(),
     }
     info["player_dead"] = None
@@ -250,8 +246,9 @@ def index():
                 import logging
                 logging.getLogger(__name__).warning("could not read save %s", s.display_name, exc_info=True)
         all_backups = list_backups()
+        backup_count = len(all_backups)
         all_b = []
-        for b in all_backups:
+        for b in all_backups[:50]:
             # Only player_dead is used in the card; reading just players.db is
             # O(1) versus extract_all which reads every metadata file. Backups
             # also have b.size_mb / b.file_count properties that rglob — skip
@@ -266,7 +263,14 @@ def index():
                 "player_dead": pi.get("is_dead"),
                 "note": get_backup_note(b.path),
             })
-        return render_template_string(PAGE, saves=save_infos, all_backups=all_b, watcher_running=manager.running, csrf_token=_CSRF_TOKEN)
+        return render_template_string(
+            PAGE,
+            saves=save_infos,
+            all_backups=all_b,
+            backup_count=backup_count,
+            watcher_running=manager.running,
+            csrf_token=_CSRF_TOKEN,
+        )
     except Exception:
         import traceback
         tb = traceback.format_exc()
@@ -420,13 +424,27 @@ def api_rename_save():
     manager = get_manager()
     try:
         preflight_rename(data["game_mode"], data["old_name"], data["new_name"])
-        # Resolve the save before renaming so we can pause the watcher
-        from .saves import get_save
+        from .saves import get_save, rename_save
         live_save = get_save(data["game_mode"], data["old_name"])
+        old_name = data["old_name"]
+        new_name = data["new_name"].strip()
         with manager.pause_for(live_save):
-            new_save = rename_save(data["game_mode"], data["old_name"], data["new_name"])
-            # Move backups alongside
-            n = rename_backups_for_save(data["game_mode"], data["old_name"], data["new_name"])
+            new_save = rename_save(data["game_mode"], old_name, new_name)
+            try:
+                n = rename_backups_for_save(data["game_mode"], old_name, new_name)
+            except BackupError:
+                try:
+                    if new_save.path.exists() and not live_save.path.exists():
+                        new_save.path.rename(live_save.path)
+                except Exception:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "could not roll back save rename %s -> %s",
+                        new_save.path,
+                        live_save.path,
+                        exc_info=True,
+                    )
+                raise
             # Update watcher if the old name was watched
             if live_save.display_name in manager.watched_saves():
                 manager.unwatch(live_save)
@@ -467,7 +485,7 @@ def api_watcher_toggle():
     cooldown = cfg.get("backup_cooldown_minutes", 1) * 60
     debounce = cfg.get("debounce_seconds", 5.0)
     for s in saves:
-        manager.watch(s, debounce_seconds=debounce, backup_cooldown_seconds=cooldown)
+        manager.watch(s, debounce_seconds=debounce, backup_cooldown_seconds=cooldown, saves_root=get_saves_root(), backups_root=get_backups_root())
     manager.start()
     return jsonify({"ok": True, "message": f"Watcher started ({len(saves)} saves)"})
 
@@ -492,7 +510,7 @@ def api_watcher_save():
     cfg = config_get_all()
     cooldown = cfg.get("backup_cooldown_minutes", 1) * 60
     debounce = cfg.get("debounce_seconds", 5.0)
-    manager.watch(save, debounce_seconds=debounce, backup_cooldown_seconds=cooldown)
+    manager.watch(save, debounce_seconds=debounce, backup_cooldown_seconds=cooldown, saves_root=get_saves_root(), backups_root=get_backups_root())
     if not manager.running:
         manager.start()
     return jsonify({"ok": True, "message": f"Watching {save.name}"})

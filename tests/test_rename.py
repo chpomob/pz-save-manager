@@ -127,6 +127,23 @@ def test_rename_backups_rejects_collision(tmp_path):
         rename_backups_for_save("Apocalypse", "Alpha", "Bravo", backups_root=backups)
 
 
+def test_rename_backups_rejects_empty_destination_dir(tmp_path):
+    """An empty destination dir is still a backup-location collision."""
+    saves = tmp_path / "saves"
+    backups = tmp_path / "backups"
+    save_dir = saves / "Apocalypse" / "Alpha"
+    save_dir.mkdir(parents=True)
+    (save_dir / "map.bin").write_text("x", encoding="utf-8")
+    create_backup("Apocalypse", "Alpha", saves_root=saves, backups_root=backups)
+    (backups / "Apocalypse" / "Bravo").mkdir()
+
+    with pytest.raises(BackupError, match="already exists"):
+        rename_backups_for_save("Apocalypse", "Alpha", "Bravo", backups_root=backups)
+
+    assert (backups / "Apocalypse" / "Alpha").is_dir()
+    assert (backups / "Apocalypse" / "Bravo").is_dir()
+
+
 def test_preflight_rename_bloque_la_collision_avant_de_renommer_la_save(tmp_path):
     """Une collision de backups doit laisser la sauvegarde et ses backups sous leur nom original."""
     saves = tmp_path / "saves"
@@ -137,7 +154,7 @@ def test_preflight_rename_bloque_la_collision_avant_de_renommer_la_save(tmp_path
         (sd / "map.bin").write_text(name, encoding="utf-8")
         create_backup("Apocalypse", name, saves_root=saves, backups_root=backups)
 
-    with pytest.raises(BackupError, match="already has backups"):
+    with pytest.raises(BackupError, match="already exists in backup location"):
         preflight_rename("Apocalypse", "Alpha", "Bravo", backups_root=backups)
         rename_save("Apocalypse", "Alpha", "Bravo", saves_root=saves)
         rename_backups_for_save("Apocalypse", "Alpha", "Bravo", backups_root=backups)

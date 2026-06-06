@@ -6,6 +6,7 @@ so the GUI never crashes on a corrupted or unexpected save format.
 
 from __future__ import annotations
 
+import contextlib
 import re
 import sqlite3
 from pathlib import Path
@@ -56,10 +57,22 @@ def map_name(save_path: Path) -> str | None:
                     return name
             except Exception:
                 pass
-            # Fallback: extract ASCII-readable chars
-            readable = "".join(chr(b) for b in raw if 32 <= b < 127)
-            if readable and len(readable) > 2:
-                return readable[:80]
+            # Fallback: look for the longest contiguous printable ASCII run
+            runs = []
+            current = []
+            for b in raw:
+                if 32 <= b < 127:
+                    current.append(chr(b))
+                else:
+                    if len(current) > 2:
+                        runs.append(''.join(current))
+                    current = []
+            if current and len(current) > 2:
+                runs.append(''.join(current))
+            if runs:
+                longest = max(runs, key=len)
+                if len(longest) > 2:
+                    return longest[:80]
     except Exception:
         pass
     return None
@@ -73,7 +86,7 @@ def player_info(save_path: Path) -> dict | None:
     if not path.is_file():
         return None
     try:
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+        with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as conn:
             cur = conn.execute(
                 "SELECT name, isDead, x, y, z, wx, wy, worldversion FROM localPlayers LIMIT 1"
             )
@@ -83,9 +96,9 @@ def player_info(save_path: Path) -> dict | None:
         return {
             "name": row[0],
             "is_dead": bool(row[1]),
-            "x": round(row[2]) if row[2] else 0,
-            "y": round(row[3]) if row[3] else 0,
-            "z": round(row[4]) if row[4] else 0,
+            "x": round(row[2]) if row[2] is not None else None,
+            "y": round(row[3]) if row[3] is not None else None,
+            "z": round(row[4]) if row[4] is not None else None,
             "wx": row[5],
             "wy": row[6],
             "world_version": row[7],
@@ -148,7 +161,7 @@ def count_vehicles(save_path: Path) -> int | None:
     if not path.is_file():
         return None
     try:
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+        with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as conn:
             cur = conn.execute("SELECT COUNT(*) FROM vehicles")
             count = cur.fetchone()[0]
         return count
@@ -164,7 +177,7 @@ def count_players(save_path: Path) -> int | None:
     try:
         if not path.is_file() or path.stat().st_size == 0:
             return None
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+        with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as conn:
             tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
             if "players" in tables:
                 cur = conn.execute("SELECT COUNT(*) FROM players")

@@ -11,7 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .platforms import get_backups_root, get_saves_root
-from .saves import SaveGame, SaveManagerError, get_save
+from .saves import SaveGame, SaveManagerError, _validate_name, get_save
 
 INTERNAL_FILES = {".pz-note", ".pz-auto", ".pz-complete"}
 _INTERNAL_PREFIX = ".pz-"
@@ -132,8 +132,10 @@ def _root(path: Path | str | None, default: Path) -> Path:
 
 
 def _validate_component(value: str, label: str) -> None:
-    if value in {"", ".", ".."} or "/" in value or chr(92) in value or "\x00" in value:
-        raise BackupError(f"Invalid {label}: {value!r}")
+    try:
+        _validate_name(value, label)
+    except SaveManagerError as exc:
+        raise BackupError(str(exc)) from exc
 
 
 def _backup_path(game_mode: str, save_name: str, timestamp: str, backups_root: Path | str | None) -> Path:
@@ -295,7 +297,7 @@ def restore_backup(
         if target.exists():
             target.rename(previous_target)
         temp_target.rename(target)
-    except OSError as exc:
+    except (OSError, shutil.Error) as exc:
         if temp_target.exists():
             shutil.rmtree(temp_target, ignore_errors=True)
         if previous_target.exists() and not target.exists():
@@ -343,8 +345,8 @@ def preflight_rename(
     root = _root(backups_root, get_backups_root())
     old_dir = root / game_mode / old_save_name
     new_dir = root / game_mode / normalized_new_name
-    if new_dir != old_dir and new_dir.is_dir():
-        raise BackupError(f"Cannot rename backups: {normalized_new_name!r} already has backups")
+    if new_dir != old_dir and (new_dir.exists() or new_dir.is_symlink()):
+        raise BackupError(f"Cannot rename backups: {normalized_new_name!r} already exists in backup location")
 
 
 def rename_backups_for_save(
@@ -369,8 +371,14 @@ def rename_backups_for_save(
     old_dir = root / game_mode / old_save_name
     new_dir = root / game_mode / normalized_new_name
 
+    if new_dir == old_dir:
+        return 0
+
     if not old_dir.is_dir():
         return 0
+
+    if new_dir.exists() or new_dir.is_symlink():
+        raise BackupError(f"Cannot rename backups: {normalized_new_name!r} already exists in backup location")
 
     # Count backups before moving
     count = sum(1 for _ in old_dir.iterdir() if _.is_dir())

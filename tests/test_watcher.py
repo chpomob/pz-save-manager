@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import pytest
+
 from pz_save_manager.backup import BackupRecord
 from pz_save_manager.saves import SaveGame
 from pz_save_manager.watcher import SaveWatcher, WatcherManager
@@ -14,17 +16,22 @@ class FakeEvent:
     is_directory = False
 
 
-def test_save_watcher_debounce(tmp_path: Path):
+def test_save_watcher_debounce(tmp_path: Path, monkeypatch):
     save_dir = tmp_path / "Sandbox" / "test-save"
     save_dir.mkdir(parents=True)
+    (save_dir / "map.bin").write_text("x")
     save = SaveGame("Sandbox", "test-save", save_dir)
+
+    from pz_save_manager.backup import create_backup
+    def fake_create_backup(game_mode, save_name, *, auto=False, **kwargs):
+        return BackupRecord(game_mode, save_name, "20260526-120000", tmp_path / "backup", auto=auto)
+    monkeypatch.setattr("pz_save_manager.watcher.create_backup", fake_create_backup)
 
     backups = []
     watcher = SaveWatcher(save, debounce_seconds=0.05, on_backup=lambda b: backups.append(b))
-    watcher.on_modified(FakeEvent())  # type: ignore
-    time.sleep(0.2)
-    # Debounce timer should have fired; backup may fail in test but watcher handles it silently
-    assert watcher._last_event > 0
+    watcher.on_modified(FakeEvent())
+    import time as _time; _time.sleep(0.2)
+    assert len(backups) == 1, f"Expected 1 backup, got {len(backups)}"
 
 
 def test_watcher_manager_lifecycle():
@@ -55,7 +62,7 @@ def test_stop_annule_le_timer_en_attente(tmp_path: Path, monkeypatch):
     save = SaveGame("Sandbox", "stop-save", save_dir)
     created = []
 
-    def fake_create_backup(game_mode: str, save_name: str, *, auto: bool = False) -> BackupRecord:
+    def fake_create_backup(game_mode: str, save_name: str, *, auto: bool = False, **kwargs) -> BackupRecord:
         created.append((game_mode, save_name, auto))
         return BackupRecord(game_mode, save_name, "20260526-120000", tmp_path / "backup", auto=auto)
 
@@ -78,7 +85,7 @@ def test_unwatch_annule_le_timer_en_attente(tmp_path: Path, monkeypatch):
     save = SaveGame("Sandbox", "unwatch-save", save_dir)
     created = []
 
-    def fake_create_backup(game_mode: str, save_name: str, *, auto: bool = False) -> BackupRecord:
+    def fake_create_backup(game_mode: str, save_name: str, *, auto: bool = False, **kwargs) -> BackupRecord:
         created.append((game_mode, save_name, auto))
         return BackupRecord(game_mode, save_name, "20260526-120000", tmp_path / "backup", auto=auto)
 

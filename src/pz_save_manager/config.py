@@ -8,9 +8,12 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 from pathlib import Path
 
 from .platforms import get_app_dir
+
+_lock = threading.Lock()
 
 CONFIG_FILE = get_app_dir() / "config.json"
 
@@ -62,9 +65,10 @@ def get(key: str):
 
 def set_(key: str, value) -> None:
     """Set a config value and save."""
-    data = _load()
-    data[key] = value
-    _save(data)
+    with _lock:
+        data = _load()
+        data[key] = value
+        _save(data)
 
 
 def get_all() -> dict:

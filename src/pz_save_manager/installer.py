@@ -9,7 +9,13 @@ import sys
 from pathlib import Path
 
 
-PROJECT_DIR = Path(__file__).resolve().parent.parent
+# Resolve to project root by finding pyproject.toml.
+_MODULE_PATH = Path(__file__).resolve()
+PROJECT_DIR = _MODULE_PATH.parent.parent
+for parent in _MODULE_PATH.parents:
+    if (parent / "pyproject.toml").is_file():
+        PROJECT_DIR = parent
+        break
 ICON = "🧟"
 
 
