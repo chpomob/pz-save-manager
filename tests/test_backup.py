@@ -2,7 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pz_save_manager.backup import create_backup, delete_backup, list_backups, restore_backup, set_backup_note
+import pytest
+
+from pz_save_manager.backup import (
+    BackupNotFound,
+    create_backup,
+    delete_backup,
+    get_backup,
+    list_backups,
+    restore_backup,
+    set_backup_note,
+)
 
 
 def make_save(root, mode="Sandbox", name="WorldOne"):
@@ -27,6 +37,39 @@ def test_create_backup_copies_save_and_uses_collision_suffix(tmp_path):
     assert second.timestamp == "20260514-103005-01"
     assert (first.path / "sandbox.lua").read_text(encoding="utf-8") == "SandboxVars = {}"
     assert (first.path / "map" / "0_0.bin").read_text(encoding="utf-8") == "chunk"
+    assert (first.path / ".pz-complete").is_file()
+    assert (second.path / ".pz-complete").is_file()
+
+
+def test_list_backups_ignores_temp_and_incomplete_directories(tmp_path):
+    saves_root = tmp_path / "saves"
+    backups_root = tmp_path / "backups"
+    make_save(saves_root)
+    backup = create_backup(
+        "Sandbox",
+        "WorldOne",
+        saves_root=saves_root,
+        backups_root=backups_root,
+        now=datetime(2026, 5, 14, 10, 30, 5),
+    )
+    backup_base = backups_root / "Sandbox" / "WorldOne"
+    (backup_base / ".tmp-20260514-103006-deadbeef").mkdir()
+    incomplete = backup_base / "20260514-103007"
+    incomplete.mkdir()
+    (incomplete / "sandbox.lua").write_text("partial", encoding="utf-8")
+
+    records = list_backups("Sandbox", "WorldOne", backups_root=backups_root)
+
+    assert [record.timestamp for record in records] == [backup.timestamp]
+
+
+def test_get_backup_rejects_missing_completion_marker(tmp_path):
+    backups_root = tmp_path / "backups"
+    backup_dir = backups_root / "Sandbox" / "WorldOne" / "20260514-103005"
+    backup_dir.mkdir(parents=True)
+
+    with pytest.raises(BackupNotFound, match="missing completion marker"):
+        get_backup("Sandbox", "WorldOne", "20260514-103005", backups_root=backups_root)
 
 
 def test_restore_backup_replaces_current_save(tmp_path):

@@ -35,6 +35,8 @@ class SaveWatcher(FileSystemEventHandler):
         self._ignore_until = 0.0  # epoch seconds; events before this are dropped
         self._last_backup_time = 0.0  # epoch seconds of last auto-backup
         self._last_backup_mtime = 0.0  # save mtime at time of last backup
+        self._in_progress: bool = False
+        self._pending_backup: bool = False
 
     def pause(self) -> None:
         """Suppress all events until resume() is called.
@@ -82,9 +84,13 @@ class SaveWatcher(FileSystemEventHandler):
         from .saves import get_save_modified_time
         backup: BackupRecord | None = None
         callback = None
+        started_backup = False
         try:
             with self._lock:
                 self._timer = None
+                if self._in_progress:
+                    self._pending_backup = True
+                    return
                 # Enforce cooldown: skip if the last auto-backup was too recent.
                 if now - self._last_backup_time < self.backup_cooldown_seconds:
                     return
@@ -97,16 +103,30 @@ class SaveWatcher(FileSystemEventHandler):
                     return
                 if current_mtime <= self._last_backup_mtime:
                     return
-                backup = create_backup(self.save.game_mode, self.save.name, auto=True)
+                self._in_progress = True
+                started_backup = True
+                callback = self.on_backup
+
+            backup = create_backup(self.save.game_mode, self.save.name, auto=True)
+
+            with self._lock:
                 self._backups.append(backup)
                 self._last_backup_time = now
                 self._last_backup_mtime = current_mtime
-                callback = self.on_backup
         except Exception as e:
             import logging
             logger = logging.getLogger(__name__)
             logger.error("Auto-backup failed for %s/%s: %s", self.save.game_mode, self.save.name, e, exc_info=True)
             return
+        finally:
+            if started_backup:
+                with self._lock:
+                    self._in_progress = False
+                    if self._pending_backup:
+                        self._pending_backup = False
+                        self._timer = threading.Timer(self.debounce_seconds, self._do_backup)
+                        self._timer.daemon = True
+                        self._timer.start()
         if backup is not None and callback:
             callback(backup)
 

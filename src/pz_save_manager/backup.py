@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import errno
+import os
 import shutil
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -12,7 +13,7 @@ from uuid import uuid4
 from .platforms import get_backups_root, get_saves_root
 from .saves import SaveGame, SaveManagerError, get_save
 
-INTERNAL_FILES = {".pz-note", ".pz-auto"}
+INTERNAL_FILES = {".pz-note", ".pz-auto", ".pz-complete"}
 _INTERNAL_PREFIX = ".pz-"
 
 
@@ -99,6 +100,7 @@ class BackupRecord:
 
 _NOTE_FILE = ".pz-note"
 _AUTO_FILE = ".pz-auto"
+_COMPLETE_FILE = ".pz-complete"
 
 
 def get_backup_note(backup_path: Path) -> str | None:
@@ -155,22 +157,23 @@ def _skip_symlinks_and_internal(d: str, names: list[str]) -> list[str]:
     ]
 
 
-def _unique_destination(base_dir: Path, timestamp: str) -> tuple[str, Path]:
-    # P0: TOCTOU-safe — reserve via atomic mkdir, then caller copies into it
-    destination = base_dir / timestamp
-    try:
-        destination.mkdir(parents=True, exist_ok=False)
-        return timestamp, destination
-    except FileExistsError:
-        pass
-    for index in range(1, 100):
-        candidate_timestamp = f"{timestamp}-{index:02d}"
-        candidate = base_dir / candidate_timestamp
+def _publish_temp_backup(tmp_path: Path, base_dir: Path, timestamp: str) -> tuple[str, Path]:
+    """Atomically publish a copied temp backup to the first free timestamp path."""
+    unavailable_errnos = {errno.EEXIST, errno.ENOTEMPTY, errno.ENOTDIR, errno.EISDIR}
+    candidate_timestamps = [timestamp, *(f"{timestamp}-{index:02d}" for index in range(1, 100))]
+    for candidate_timestamp in candidate_timestamps:
+        destination = base_dir / candidate_timestamp
+        if destination.exists() or destination.is_symlink():
+            continue
         try:
-            candidate.mkdir(parents=True, exist_ok=False)
-            return candidate_timestamp, candidate
+            os.replace(tmp_path, destination)
+            return candidate_timestamp, destination
         except FileExistsError:
             continue
+        except OSError as exc:
+            if exc.errno in unavailable_errnos:
+                continue
+            raise
     raise BackupError(f"Could not allocate a unique backup under {base_dir}")
 
 
@@ -191,26 +194,23 @@ def create_backup(
     save = get_save(game_mode, save_name, saves_root=saves_root)
     backup_base = _root(backups_root, get_backups_root()) / game_mode / save_name
     backup_base.mkdir(parents=True, exist_ok=True)
-    timestamp, destination = _unique_destination(backup_base, _timestamp(now))
-    # P0: copy to temp inside destination, then atomically move contents
-    tmp = Path(tempfile.mkdtemp(dir=destination.parent, prefix=f".tmp-{timestamp}-"))
+    timestamp = _timestamp(now)
+    tmp_path = backup_base / f".tmp-{timestamp}-{uuid4().hex[:8]}"
     try:
-        shutil.copytree(save.path, tmp, copy_function=shutil.copy2,
-                        ignore=_skip_symlinks_and_internal, dirs_exist_ok=True)
-        # Atomic: move all contents from tmp into destination
-        for item in tmp.iterdir():
-            shutil.move(str(item), str(destination / item.name))
+        shutil.copytree(save.path, tmp_path, copy_function=shutil.copy2,
+                        ignore=_skip_symlinks_and_internal)
+        # Write completion marker inside temp dir BEFORE atomic rename
+        # so a crash between rename and marker never leaves an orphan.
+        (tmp_path / _COMPLETE_FILE).touch()
+        timestamp, destination = _publish_temp_backup(tmp_path, backup_base, timestamp)
+        if auto:
+            try:
+                (destination / _AUTO_FILE).touch()
+            except OSError:
+                pass
     except Exception:
-        shutil.rmtree(destination, ignore_errors=True)
+        shutil.rmtree(tmp_path, ignore_errors=True)
         raise
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-    # Persist auto/manual marker
-    if auto:
-        try:
-            (destination / _AUTO_FILE).touch()
-        except OSError:
-            pass
     result = BackupRecord(game_mode, save_name, timestamp, destination, auto=auto)
     # Prune excess auto-backups (manual backups are never pruned)
     if auto:
@@ -243,9 +243,12 @@ def list_backups(
             if not save_dir.is_dir():
                 continue
             for backup_dir in save_dir.iterdir():
-                if backup_dir.is_dir():
-                    auto = (backup_dir / _AUTO_FILE).is_file()
-                    records.append(BackupRecord(mode_dir.name, save_dir.name, backup_dir.name, backup_dir, auto=auto))
+                if not backup_dir.is_dir() or backup_dir.name.startswith("."):
+                    continue
+                if not (backup_dir / _COMPLETE_FILE).is_file():
+                    continue
+                auto = (backup_dir / _AUTO_FILE).is_file()
+                records.append(BackupRecord(mode_dir.name, save_dir.name, backup_dir.name, backup_dir, auto=auto))
     return sorted(
         records,
         key=lambda backup: (backup.game_mode.casefold(), backup.save_name.casefold(), backup.timestamp),
@@ -264,6 +267,10 @@ def get_backup(
     path = _backup_path(game_mode, save_name, timestamp, backups_root)
     if not path.is_dir():
         raise BackupNotFound(f"Backup not found: {game_mode}/{save_name}/{timestamp}")
+    if not (path / _COMPLETE_FILE).is_file():
+        raise BackupNotFound(
+            f"Backup may be incomplete (missing completion marker): {game_mode}/{save_name}/{timestamp}"
+        )
     auto = (path / _AUTO_FILE).is_file()
     return BackupRecord(game_mode, save_name, timestamp, path, auto=auto)
 
@@ -398,7 +405,9 @@ def prune_auto_backups(
     # Collect auto-backup directories with their timestamps
     autos: list[tuple[str, Path]] = []
     for item in save_dir.iterdir():
-        if item.is_dir() and (item / _AUTO_FILE).is_file():
+        if item.name.startswith("."):
+            continue
+        if item.is_dir() and (item / _AUTO_FILE).is_file() and (item / _COMPLETE_FILE).is_file():
             autos.append((item.name, item))
 
     if len(autos) <= max_count:

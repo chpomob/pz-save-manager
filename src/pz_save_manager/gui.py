@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -16,6 +17,15 @@ from .saves import SaveGame, SaveNotFound, get_save_modified_time, list_saves
 from .watcher import WatcherManager, get_manager
 
 app = Flask(__name__)
+
+_CSRF_TOKEN: str = secrets.token_hex(32)
+
+
+def _check_csrf():
+    if request.headers.get("X-CSRF-Token") != _CSRF_TOKEN:
+        return jsonify({"ok": False, "error": "Invalid CSRF token"}), 403
+    return None
+
 
 PAGE = """<!doctype html>
 <html lang="en" data-theme="dark">
@@ -173,9 +183,11 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 </div>
 </div>
 </div>
+<meta name="csrf-token" content="{{ csrf_token }}">
 <script>
 function toast(m,c){var t=document.getElementById('toast');t.textContent=m;t.style.background=c||'var(--green)';t.style.display='block';setTimeout(function(){t.style.display='none'},2500)}
-function api(m,u,b){return fetch(u,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined})}
+var csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+function api(m,u,b){return fetch(u,{method:m,headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},body:b?JSON.stringify(b):undefined})}
 function doAction(b,url,body,okMsg){
   if(b)b.disabled=true;
   return api('POST',url,body).then(r=>r.json()).then(d=>{
@@ -254,7 +266,7 @@ def index():
                 "player_dead": pi.get("is_dead"),
                 "note": get_backup_note(b.path),
             })
-        return render_template_string(PAGE, saves=save_infos, all_backups=all_b, watcher_running=manager.running)
+        return render_template_string(PAGE, saves=save_infos, all_backups=all_b, watcher_running=manager.running, csrf_token=_CSRF_TOKEN)
     except Exception:
         import traceback
         tb = traceback.format_exc()
@@ -340,6 +352,9 @@ def _need(data: dict | None, *keys: str):
 
 @app.route("/api/backup", methods=["POST"])
 def api_backup():
+    csrf_err = _check_csrf()
+    if csrf_err:
+        return csrf_err
     data, err = _need(request.get_json(silent=True), "game_mode", "save_name")
     if err:
         return err
@@ -352,6 +367,9 @@ def api_backup():
 
 @app.route("/api/restore", methods=["POST"])
 def api_restore():
+    csrf_err = _check_csrf()
+    if csrf_err:
+        return csrf_err
     data, err = _need(request.get_json(silent=True), "game_mode", "save_name", "timestamp")
     if err:
         return err
@@ -376,6 +394,9 @@ def api_restore():
 
 @app.route("/api/backup/delete", methods=["POST"])
 def api_delete_backup():
+    csrf_err = _check_csrf()
+    if csrf_err:
+        return csrf_err
     data, err = _need(request.get_json(silent=True), "game_mode", "save_name", "timestamp")
     if err:
         return err
@@ -388,6 +409,9 @@ def api_delete_backup():
 
 @app.route("/api/save/rename", methods=["POST"])
 def api_rename_save():
+    csrf_err = _check_csrf()
+    if csrf_err:
+        return csrf_err
     data, err = _need(request.get_json(silent=True), "game_mode", "old_name", "new_name")
     if err:
         return err
@@ -414,6 +438,9 @@ def api_rename_save():
 
 @app.route("/api/backup/annotate", methods=["POST"])
 def api_annotate_backup():
+    csrf_err = _check_csrf()
+    if csrf_err:
+        return csrf_err
     data, err = _need(request.get_json(silent=True), "game_mode", "save_name", "timestamp")
     if err:
         return err
@@ -428,6 +455,9 @@ def api_annotate_backup():
 
 @app.route("/api/watcher/toggle", methods=["POST"])
 def api_watcher_toggle():
+    csrf_err = _check_csrf()
+    if csrf_err:
+        return csrf_err
     manager = get_manager()
     if manager.running:
         manager.stop()
@@ -444,6 +474,9 @@ def api_watcher_toggle():
 
 @app.route("/api/watcher/save", methods=["POST"])
 def api_watcher_save():
+    csrf_err = _check_csrf()
+    if csrf_err:
+        return csrf_err
     data, err = _need(request.get_json(silent=True), "game_mode", "save_name")
     if err:
         return err
@@ -470,6 +503,9 @@ def api_config():
     """Get or update configuration."""
     if request.method == "GET":
         return jsonify(config_get_all())
+    csrf_err = _check_csrf()
+    if csrf_err:
+        return csrf_err
     data = request.get_json(silent=True) or {}
     try:
         allowed = {"backups_dir", "debounce_seconds", "backup_cooldown_minutes", "max_auto_backups", "port", "auto_start_watcher"}
@@ -528,6 +564,9 @@ def serve_thumbnail(game_mode: str, save_name: str):
 @app.route("/api/shutdown", methods=["POST"])
 def api_shutdown():
     """Gracefully stop the server."""
+    csrf_err = _check_csrf()
+    if csrf_err:
+        return csrf_err
     manager = get_manager()
     if manager.running:
         manager.stop()

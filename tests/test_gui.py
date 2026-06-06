@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from pz_save_manager.gui import app
+from pz_save_manager.gui import _CSRF_TOKEN, app
 
 
 @pytest.fixture
@@ -26,6 +26,10 @@ def client(tmp_path: Path, monkeypatch):
     return app.test_client()
 
 
+def csrf_headers() -> dict[str, str]:
+    return {"X-CSRF-Token": _CSRF_TOKEN}
+
+
 def test_index_shows_saves(client):
     resp = client.get("/")
     assert resp.status_code == 200
@@ -34,27 +38,33 @@ def test_index_shows_saves(client):
 
 
 def test_api_backup_creates_backup(client):
-    resp = client.post("/api/backup", json={"game_mode": "Apocalypse", "save_name": "test-world"})
+    resp = client.post("/api/backup", json={"game_mode": "Apocalypse", "save_name": "test-world"}, headers=csrf_headers())
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["ok"] is True
     assert "timestamp" in data
 
 
+def test_api_backup_requires_csrf(client):
+    resp = client.post("/api/backup", json={"game_mode": "Apocalypse", "save_name": "test-world"})
+    assert resp.status_code == 403
+    assert resp.get_json()["ok"] is False
+
+
 def test_api_backup_missing_save_returns_400(client):
-    resp = client.post("/api/backup", json={"game_mode": "Apocalypse", "save_name": "nonexistent"})
+    resp = client.post("/api/backup", json={"game_mode": "Apocalypse", "save_name": "nonexistent"}, headers=csrf_headers())
     assert resp.status_code == 400
     assert resp.get_json()["ok"] is False
 
 
 def test_api_restore_invalid_returns_400(client):
-    resp = client.post("/api/restore", json={"game_mode": "X", "save_name": "Y", "timestamp": "bad"})
+    resp = client.post("/api/restore", json={"game_mode": "X", "save_name": "Y", "timestamp": "bad"}, headers=csrf_headers())
     assert resp.status_code == 400
 
 
 def test_api_watcher_toggle(client):
-    resp = client.post("/api/watcher/toggle")
+    resp = client.post("/api/watcher/toggle", headers=csrf_headers())
     assert resp.status_code == 200
     assert resp.get_json()["ok"] is True
-    resp = client.post("/api/watcher/toggle")
+    resp = client.post("/api/watcher/toggle", headers=csrf_headers())
     assert resp.status_code == 200

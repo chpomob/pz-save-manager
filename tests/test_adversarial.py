@@ -33,6 +33,7 @@ def test_restore_does_not_follow_backup_symlinks(tmp_path: Path) -> None:
     backups = tmp_path / "backups"
     backup_dir = backups / "Sandbox" / "World" / "20260518-120000"
     backup_dir.mkdir(parents=True)
+    (backup_dir / ".pz-complete").touch()
 
     secret = tmp_path / "secret.txt"
     secret.write_text("do-not-copy", encoding="utf-8")
