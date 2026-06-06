@@ -154,6 +154,9 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 </div>
 {% endfor %}
 {% if ns.open %}</div>{% endif %}
+{% if all_backups|length > 50 %}
+<p style="text-align:center;color:var(--muted);font-size:.78rem;padding:.5rem">Showing 50 of {{ all_backups|length }} backups.</p>
+{% endif %}
 <div id="toast" class="toast" style="display:none"></div>
 <div id="settings-overlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);z-index:100;justify-content:center;align-items:center" onclick="if(event.target===this)toggleSettings()">
 <div style="background:var(--surface);padding:2rem;border-radius:var(--radius);max-width:450px;width:90%;border:1px solid var(--accent)">
@@ -211,6 +214,9 @@ def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
         } for b in backups[:5]],
         "watched": save.display_name in manager.watched_saves(),
     }
+    info["player_dead"] = None
+    info["player_x"] = None
+    info["player_y"] = None
     for k in ("players", "map_pos", "mod_count",
               "player", "player_dead", "player_x", "player_y", "player_world_version"):
         if k in extra:
@@ -427,9 +433,11 @@ def api_watcher_toggle():
         manager.stop()
         return jsonify({"ok": True, "message": "Watcher stopped"})
     saves = list_saves()
-    cooldown = config_get_all().get("backup_cooldown_minutes", 5) * 60
+    cfg = config_get_all()
+    cooldown = cfg.get("backup_cooldown_minutes", 1) * 60
+    debounce = cfg.get("debounce_seconds", 5.0)
     for s in saves:
-        manager.watch(s, backup_cooldown_seconds=cooldown)
+        manager.watch(s, debounce_seconds=debounce, backup_cooldown_seconds=cooldown)
     manager.start()
     return jsonify({"ok": True, "message": f"Watcher started ({len(saves)} saves)"})
 
@@ -448,7 +456,10 @@ def api_watcher_save():
     if save.display_name in manager.watched_saves():
         manager.unwatch(save)
         return jsonify({"ok": True, "message": f"Unwatched {save.name}"})
-    manager.watch(save)
+    cfg = config_get_all()
+    cooldown = cfg.get("backup_cooldown_minutes", 1) * 60
+    debounce = cfg.get("debounce_seconds", 5.0)
+    manager.watch(save, debounce_seconds=debounce, backup_cooldown_seconds=cooldown)
     if not manager.running:
         manager.start()
     return jsonify({"ok": True, "message": f"Watching {save.name}"})
@@ -461,7 +472,10 @@ def api_config():
         return jsonify(config_get_all())
     data = request.get_json(silent=True) or {}
     try:
+        allowed = {"backups_dir", "debounce_seconds", "backup_cooldown_minutes", "max_auto_backups", "port", "auto_start_watcher"}
         for key, value in data.items():
+            if key not in allowed:
+                continue
             # Allow clearing string-typed settings (e.g. resetting backups_dir to default)
             if key == "backups_dir":
                 config_set(key, value if value else None)
@@ -547,18 +561,22 @@ def api_shutdown():
     return jsonify({"ok": True, "message": "Shutting down..."})
 
 
-def run_gui(host: str = "127.0.0.1", port: int = 8080) -> None:
+def run_gui(host: str = "127.0.0.1", port: int = 8080, saves_root: Path | None = None, backups_root: Path | None = None, open_browser: bool = True) -> None:
     import webbrowser
     url = f"http://{host}:{port}"
-    saves_root = get_saves_root()
+    if saves_root is None:
+        saves_root = get_saves_root()
+    if backups_root is None:
+        backups_root = get_backups_root()
     try:
         save_count = len(list_saves())
     except Exception as e:
         save_count = f"error: {e!r}"
     print(f"\n  PZ Save Manager - {url}")
     print(f"  Saves dir : {saves_root} (exists={saves_root.is_dir()})")
-    print(f"  Backups   : {get_backups_root()}")
+    print(f"  Backups   : {backups_root}")
     print(f"  Found     : {save_count} save(s)")
     print(f"  Diagnostics: {url}/health\n")
-    webbrowser.open(url)
+    if open_browser:
+        webbrowser.open(url)
     app.run(host=host, port=port, debug=False)

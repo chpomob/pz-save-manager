@@ -131,16 +131,13 @@ def delete_command(ctx: click.Context, game_mode: str, save_name: str, timestamp
 @click.option("--host", default="127.0.0.1", help="Host to bind to.")
 @click.option("--port", default=8080, type=int, help="Port to listen on.")
 @click.option("--no-browser", is_flag=True, help="Don't open browser automatically.")
-def gui_command(host: str, port: int, no_browser: bool) -> None:
+@click.pass_context
+def gui_command(ctx: click.Context, host: str, port: int, no_browser: bool) -> None:
     """Launch the web GUI."""
-    if no_browser:
-        import flask
-        # We still want the GUI but without browser open
-        from .gui import app
-        print(f"\n  🧟 PZ Save Manager — http://{host}:{port}\n")
-        app.run(host=host, port=port, debug=False)
-    else:
-        run_gui(host, port)
+    from .gui import run_gui
+    saves_root = ctx.obj.get("saves_root")
+    backups_root = ctx.obj.get("backups_root")
+    run_gui(host, port, saves_root=saves_root, backups_root=backups_root, open_browser=not no_browser)
 
 
 @main.command("config")
@@ -163,18 +160,21 @@ def config_command(key: str | None, value: str | None) -> None:
         return
 
     # Convert types
-    if key == "debounce_seconds":
-        value = float(value)  # type: ignore
-    elif key == "backup_cooldown_minutes":
-        value = int(value)  # type: ignore
-    elif key == "max_auto_backups":
-        value = int(value)  # type: ignore
-    elif key == "port":
-        value = int(value)  # type: ignore
-    elif key in ("auto_start_watcher",):
-        value = value.lower() in ("true", "1", "yes")  # type: ignore
-    elif key == "backups_dir" and value in ("", "none", "null"):
-        value = None  # type: ignore
+    try:
+        if key == "debounce_seconds":
+            value = float(value)  # type: ignore
+        elif key == "backup_cooldown_minutes":
+            value = int(value)  # type: ignore
+        elif key == "max_auto_backups":
+            value = int(value)  # type: ignore
+        elif key == "port":
+            value = int(value)  # type: ignore
+        elif key in ("auto_start_watcher",):
+            value = value.lower() in ("true", "1", "yes")  # type: ignore
+        elif key == "backups_dir" and value in ("", "none", "null"):
+            value = None  # type: ignore
+    except (ValueError, TypeError) as e:
+        raise click.ClickException(f"Invalid value for '{key}': {e}") from e
 
     set_(key, value)
     console.print(f"[green]{key} = {value}[/green]")

@@ -1,0 +1,69 @@
+After reading `gui.py`, `backup.py`, `watcher.py`, and `config.py`, here is my verdict on each finding:
+
+```json
+{
+  "responses": [
+    {
+      "finding_id": "A1",
+      "action": "challenge",
+      "rationale": "The severity is overstated for the actual threat model. run_gui() binds to 127.0.0.1 by default; on localhost, only the user's own browser can reach the app — that is the intended and standard design for local desktop web UIs (e.g., Jupyter, Grafana local, most game mod tools). The reviewer is correct that CSRF is real for /api/shutdown and /api/watcher/toggle because those handlers do not require a JSON body (they never call get_json), so a plain HTML form POST from a malicious page would reach them. However, every destructive operation (restore, delete, rename) goes through _need(request.get_json(...)) which returns an error for non-JSON bodies, blocking form-POST CSRF on those routes. The residual CSRF risk is limited to stopping the watcher or shutting down the process — annoying, not data-destructive. The --host 0.0.0.0 path is a legitimate concern but requires a user explicitly overriding the default; it warrants a CLI warning, not an auth system. Rating this 'major' on par with the concurrency and invariant bugs overclaims the blast radius.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "A2",
+      "action": "challenge",
+      "rationale": "/health is genuinely useful for troubleshooting a blank page — that is its documented purpose. On the default localhost bind, only the user themselves can access it, making 'leak' a misnomer: the user already knows their own paths. The finding's severity collapses to low if A1's LAN-exposure prerequisite does not materialize. The suggestion to 'gate behind auth token' would require implementing A1's full auth system first. A more proportionate fix is adding a loopback-only guard in run_gui (already the default host) plus a CLI warning on non-loopback binds, which would make both A1 and A2 moot simultaneously.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "A3",
+      "action": "validate",
+      "rationale": "Confirmed by reading api_rename_save. The sequence is: preflight_rename → rename_save → rename_backups_for_save, all under pause_for but with no rollback for the live-save rename. rename_backups_for_save wraps a single old_dir.rename(new_dir) syscall (usually atomic on same-volume), so failures are rare — but possible (permissions change, cross-device, concurrent creator after preflight). When it does fail, the exception is caught and a 400 is returned with no attempt to rename the live save back. The backup history then silently diverges from the live save name. Preflight covers the 'new name already has backups' case but not OS-level rename failures.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "A4",
+      "action": "validate",
+      "rationale": "Confirmed: WatcherManager has no lock over _observer, _watchers, _watches, or _running. Flask's Werkzeug dev server runs with threaded=True by default since Flask 1.0, so concurrent route handlers are real. Specifically: watch() and unwatch() both read+mutate _watchers and _watches across multiple statements without any lock; stop() iterates _watchers while another thread could be inside watch(); start() re-creates _observer and iterates _watchers, all unguarded. SaveWatcher._lock is per-instance and correct, but WatcherManager's own state is exposed. This is a legitimate concurrent-mutation hazard.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "A5",
+      "action": "validate",
+      "rationale": "Confirmed. set_() does load → modify → save without any lock. api_config iterates keys and calls set_() once per key, so a multi-key save is a sequence of distinct load-modify-save cycles. Two concurrent settings requests can each read the same old config and overwrite each other. Practical probability for a single-user local app is low but nonzero (browser opening two tabs or retry on slow network). The _save() function already does an atomic os.replace write to prevent partial files; the missing piece is only a process-level lock around the load-modify-save cycle.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "A6",
+      "action": "validate",
+      "rationale": "Confirmed by reading _do_backup: create_backup(...) is called at line 100 inside 'with self._lock'. Copying a PZ save (gigabytes of chunk files) can easily take tens of seconds. During that time pause(), cancel_pending(), and on_modified() all contend on self._lock. The concrete consequence is: if a restore is triggered while a backup is running, the pause_for() context manager in api_restore calls watcher.pause(), which blocks on self._lock until the backup finishes. The restore is effectively stalled. The fix of releasing the lock before create_backup and reacquiring only to write metadata is straightforward and correct.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "A7",
+      "action": "validate",
+      "rationale": "Confirmed by reading create_backup and list_backups. _unique_destination reserves the final timestamp directory via mkdir(exist_ok=False) before any files exist in it. list_backups iterates save_dir and treats any subdirectory as a valid BackupRecord — it does not check for completeness. From the moment _unique_destination returns, the empty destination is visible to list_backups and exploitable by a concurrent restore or delete request. The multi-step 'move contents from tmp into destination' loop (lines 201-202) makes the window even wider. The suggested fix of using a hidden reservation name and doing a single rename to the final path is correct and preserves TOCTOU safety. Note the existing comment '// P0: TOCTOU-safe' refers only to preventing two concurrent backups from colliding on the same timestamp name, not to preventing visibility of incomplete backups.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "A8",
+      "action": "validate",
+      "rationale": "Confirmed: prune_auto_backups returns 0 for max_count <= 0, and create_backup calls it whenever max_auto >= 0 (which includes 0). So setting max_auto_backups to 0 in config.json silently disables pruning while a user might expect it to prune all. The settings UI uses min='1' which prevents setting 0 through the GUI, but it is reachable via direct config.json edit or the /api/config endpoint. The docstring says 'at most max_count remain', which under max_count=0 should prune everything. The semantic contract is broken. The 'unbounded disk growth' framing is slightly strong given the GUI guard, but the invariant mismatch is real and the fix is trivial.",
+      "your_miss": false
+    }
+  ],
+  "new_findings": [
+    {
+      "id": "N1",
+      "severity": "minor",
+      "file": "src/pz_save_manager/watcher.py",
+      "line": 198,
+      "category": "concurrency",
+      "title": "get_manager() singleton initialization is not thread-safe",
+      "description": "get_manager() checks 'if _manager is None' and then assigns '_manager = WatcherManager()'. In CPython with threaded Flask, two concurrent requests can both observe _manager as None before either assignment completes, because the GIL is released at various points during WatcherManager.__init__() (Observer() spawns a thread). The second thread would overwrite the first manager, silently discarding any watches already registered on it. This is a classic check-then-act race on a module-level global. A threading.Lock or module-level initialization (assign at import time) would close the window.",
+      "suggestion": "Initialize _manager at module level ('_manager = WatcherManager()') or protect get_manager() with a module-level threading.Lock. The simpler fix is eager initialization since WatcherManager.__init__ is side-effect-free."
+    }
+  ],
+  "summary": "6 validated, 2 challenged, 1 new finding added. A1 and A2 are real observations but misclassified as 'major' for a localhost desktop tool — the actual blast radius is narrow (CSRF limited to non-destructive stop/shutdown; /health only leaks to the local user). The concurrency and invariant bugs (A3–A7) are genuinely major for the reasons given. A8 is correctly classified minor. New finding N1 (singleton race in get_manager) was masked by A4's broader framing but is a distinct and independently fixable issue."
+}
+```

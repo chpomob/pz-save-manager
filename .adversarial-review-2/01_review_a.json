@@ -1,0 +1,67 @@
+{
+  "findings": [
+    {
+      "id": "A1",
+      "severity": "blocker",
+      "file": "src/pz_save_manager/gui.py",
+      "line": 335,
+      "category": "security",
+      "title": "Unauthenticated HTTP API performs privileged filesystem actions",
+      "description": "The Flask GUI exposes POST endpoints that create backups, restore live saves, delete backup directories, rename saves, mutate config, start/stop watchers, and terminate the process. None of these routes require authentication, CSRF protection, Origin/Host validation, or a loopback-only guard. The app defaults to 127.0.0.1, but run_gui accepts arbitrary hosts and the CLI exposes --host, so binding to 0.0.0.0 turns this into a remote destructive API.",
+      "suggestion": "Require a per-session random token for all mutating endpoints, validate Origin/Host, and refuse non-loopback binds unless authentication is explicitly configured. Keep shutdown/config/delete/restore behind the same authorization boundary."
+    },
+    {
+      "id": "A2",
+      "severity": "blocker",
+      "file": "src/pz_save_manager/backup.py",
+      "line": 314,
+      "category": "security",
+      "title": "Backup deletion trusts any directory under a configurable root",
+      "description": "delete_backup calls get_backup and then shutil.rmtree on the resolved path, but get_backup only checks that the path is a directory. Because backups_dir is user-configurable through /api/config, a malicious or mistaken configuration can make arbitrary existing directories look like backups. For example, with backups_dir set to '/', deleting game_mode='home', save_name='<user>', timestamp='Documents' would target /home/<user>/Documents if it exists.",
+      "suggestion": "Make backup ownership explicit. Store backups under an application-owned namespace, reject dangerous roots such as '/', the home directory, and the live saves root, canonicalize paths, and require a manager-created metadata marker before restore/delete/prune operations can treat a directory as a backup."
+    },
+    {
+      "id": "A3",
+      "severity": "major",
+      "file": "src/pz_save_manager/backup.py",
+      "line": 194,
+      "category": "concurrency",
+      "title": "Backup creation publishes incomplete backup directories",
+      "description": "create_backup reserves the final destination directory before copying, then copies into a sibling temp directory and moves files into the already-visible destination. list_backups treats any directory as a valid backup, so concurrent UI/API reads can expose an empty or partially moved backup. If the process dies between mkdir and completion, a corrupt empty backup remains visible and can later be restored.",
+      "suggestion": "Keep in-progress backups outside the visible backup namespace or mark them incomplete. Only publish a backup by atomically renaming a fully populated temp directory into place, and have list_backups/restore/delete require a completion marker."
+    },
+    {
+      "id": "A4",
+      "severity": "major",
+      "file": "src/pz_save_manager/gui.py",
+      "line": 397,
+      "category": "design",
+      "title": "Save rename and backup rename are not transactional",
+      "description": "api_rename_save renames the live save first and then moves the backup history. If rename_backups_for_save fails after rename_save succeeds, the request returns an error but the live save has already moved, backups remain under the old name, and watcher state may not be updated. This violates the invariant that a save and its backup history share the same identity.",
+      "suggestion": "Move this workflow into a domain service that performs save rename, backup rename, and watcher update under one transaction-like operation. Add rollback for partial failure, or stage both renames through temporary names and commit only when both sides can succeed."
+    },
+    {
+      "id": "A5",
+      "severity": "major",
+      "file": "src/pz_save_manager/watcher.py",
+      "line": 117,
+      "category": "concurrency",
+      "title": "WatcherManager mutates shared observer state without synchronization",
+      "description": "WatcherManager owns mutable dictionaries, an Observer instance, and a running flag, but start, stop, watch, unwatch, watched_saves, pause_for, and get_manager are all unsynchronized. Flask can process concurrent requests while watchdog and Timer callbacks are active, so overlapping watcher toggles, save renames, and shutdowns can race, schedule duplicate watches, unschedule stale handles, or create two global managers.",
+      "suggestion": "Protect WatcherManager and the singleton initializer with an RLock, and make observer lifecycle transitions serialized. Consider an actor/command-queue model so all watch/unwatch/start/stop operations happen on one thread."
+    },
+    {
+      "id": "A6",
+      "severity": "major",
+      "file": "src/pz_save_manager/gui.py",
+      "line": 253,
+      "category": "security",
+      "title": "Diagnostics leak local paths and runtime details",
+      "description": "The index error handler renders a full traceback to the browser, and /health exposes Python version, executable path, save paths, backup paths, save names, and directory children. This is sensitive local filesystem and environment data, especially when the GUI is reachable beyond loopback.",
+      "suggestion": "Return a generic error page by default and log tracebacks server-side. Gate /health and detailed diagnostics behind authentication or an explicit local debug mode."
+    }
+  ],
+  "overall_assessment": "The core backup and save operations have useful defensive pieces, but the architecture lacks a clear trust boundary and durable ownership model for backups. Destructive filesystem operations are exposed directly through the GUI, backup validity is inferred from directory shape, and watcher state is shared without synchronization.",
+  "verdict": "REJECT",
+  "summary": "2 blockers, 4 majors — security boundary and backup invariants need rework before approval"
+}

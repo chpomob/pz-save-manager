@@ -147,7 +147,12 @@ class WatcherManager:
     def watch(self, save: SaveGame, debounce_seconds: float = 5.0, backup_cooldown_seconds: float = 300.0) -> SaveWatcher:
         key = save.display_name
         if key in self._watchers:
-            return self._watchers[key]
+            old_watcher = self._watchers[key]
+            old_watcher.cancel_pending()
+            # Create new watcher with updated settings
+            watcher = SaveWatcher(save, debounce_seconds, backup_cooldown_seconds)
+            self._watchers[key] = watcher
+            return watcher
         watcher = SaveWatcher(save, debounce_seconds, backup_cooldown_seconds)
         self._watchers[key] = watcher
         handle = self._observer.schedule(watcher, str(save.path), recursive=True)

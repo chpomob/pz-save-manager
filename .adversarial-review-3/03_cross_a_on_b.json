@@ -1,0 +1,87 @@
+I've now verified all the technical claims against the actual code. Here's my devil's advocate assessment.
+
+```json
+{
+  "responses": [
+    {
+      "finding_id": "B1",
+      "action": "validate",
+      "rationale": "Confirmed. _unique_destination reserves the FINAL timestamp dir via mkdir BEFORE any data is copied (backup.py:160-163), then copytree writes into a sibling `.tmp-<ts>-*` dir (line 196) created in destination.parent (= the save's backup dir that list_backups scans), then moves contents in one by one (line 201-202). list_backups (line 245-248) accepts ANY directory with no name/dot filtering, so during the copy window both the empty reserved destination AND the `.tmp-*` sibling are returned as valid BackupRecords. A process kill between mkdir and the finally-rmtree leaves both permanently. Restoring the empty one restores an empty save. Real bug.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B2",
+      "action": "challenge",
+      "rationale": "The central premise is factually wrong. In CPython Python 3, shutil.Error is defined as `class Error(OSError): pass` (Lib/shutil.py) — it is a subclass of OSError. Therefore `except OSError` at backup.py:290 DOES catch shutil.Error, the cleanup/rollback path runs, and the error IS wrapped in BackupError. copytree's aggregated failures and copy2-originated errors are OSError-family. The described gap does not exist. (Broadening to `except Exception` would be defensible defensively, but the stated bug — uncategorized exception escaping, skipped rollback — is incorrect.)",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B3",
+      "action": "validate",
+      "rationale": "Confirmed by reading both sides. rename_save normalizes: new_path uses new_name.strip() (saves.py:157) and returns SaveGame with new_name.strip() (line 164). But rename_backups_for_save uses the RAW new_save_name for new_dir (backup.py:361) and only _validate_component (which permits leading/trailing spaces). CLI rename_command (cli.py:194-195) passes the same raw argument to both. So `pz-saves rename Survivor old '  Clean  '` moves the save to 'Clean' but backups to '  Clean  ', splitting history. preflight_rename normalizes only for its own collision check (backup.py:332), masking the inconsistency. GUI is safe only because JS trims client-side. Real bug.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B4",
+      "action": "validate",
+      "rationale": "Confirmed. _save_info only copies player_dead/player_x/player_y into info if present in extra (gui.py:214-217), and extract_all omits all player_* keys entirely when players.db is absent/unreadable (save_info.py:214-218 are inside the conditional). In Jinja2 a missing dict key yields Undefined, not None: `Undefined is none` is False and Undefined is falsy, so the template (gui.py:93,98) falls through to the else branch and renders '🟢 Alive', and the Position line at line 100 (`is not none`) — Undefined is not none is True, so it renders '(, )' with blank coords. Note the backup cards are NOT affected because they explicitly set player_dead via pi.get('is_dead') (line 248). Bug confined to main save cards, but real.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B5",
+      "action": "validate",
+      "rationale": "Confirmed the code smell: SaveWatcher stores self.save with an explicit .path, but _do_backup (watcher.py:100) calls create_backup(game_mode, name, auto=True) with no saves_root/backups_root, so create_backup re-resolves via get_save against the DEFAULT saves root (backup.py:191). The watched SaveGame.path is ignored. I downgrade the practical severity: every current caller (gui api_watcher_toggle/api_watcher_save and list_saves) uses default roots, so today save.path always equals the default resolution and no misdirected backup actually occurs. It is a latent correctness gap, not an active major bug — but the fix (carry roots / back up from self.save.path) is correct.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B6",
+      "action": "validate",
+      "rationale": "Confirmed. api_watcher_save calls manager.watch(save) (gui.py:451) with no cooldown, defaulting to 300s in WatcherManager.watch (watcher.py:147), while the bulk api_watcher_toggle passes backup_cooldown_seconds from config (gui.py:430-432). Inconsistent behavior between the two UI controls. Minor, valid.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B7",
+      "action": "validate",
+      "rationale": "Confirmed. WatcherManager.watch returns the existing watcher unchanged when the key is already present (watcher.py:149-150), never applying new debounce/cooldown. After a settings change, a re-watch is a no-op on timing. Minor, valid.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B8",
+      "action": "validate",
+      "rationale": "Confirmed. The Click group stores ctx.obj['saves_root']/['backups_root'] from --saves-dir/--backups-dir (cli.py:31-33), but gui_command (cli.py:134) has no @click.pass_context and run_gui/app.run receive no roots. The GUI layer calls list_saves()/create_backup() with no root args, so it always uses default/config dirs. `pz-saves --saves-dir X gui` silently ignores X. Real bug; major because it's a silent wrong-directory operation.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B9",
+      "action": "validate",
+      "rationale": "Confirmed. installer.py:12 PROJECT_DIR = Path(__file__).resolve().parent.parent. __file__ is src/pz_save_manager/installer.py, so PROJECT_DIR resolves to the `src/` directory (or site-packages when pip-installed). launcher.sh/launcher.bat live at the repo root, one level ABOVE src/, so PROJECT_DIR/launcher.sh points at src/launcher.sh which does not exist. The generated .desktop Exec (line 27) and Windows shortcut TargetPath (line 47) are broken. No existence check before writing. Real bug.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B10",
+      "action": "validate",
+      "rationale": "Confirmed. count_players checks `path.is_file() or path.stat().st_size == 0` with stat() OUTSIDE the try block (save_info.py:164). A TOCTOU deletion between is_file() and stat() raises FileNotFoundError (an OSError subclass) that escapes, violating the module's documented 'return None on any failure' contract. Notably count_vehicles (line 147-149) and others do NOT call stat() pre-try, so count_players is the lone offender. Minor, valid edge case.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B11",
+      "action": "validate",
+      "rationale": "Confirmed. config_command does float()/int() conversions outside any try (cli.py:166-177), so `pz-saves config port abc` raises a raw ValueError with a traceback rather than a clean ClickException, unlike backup/restore which wrap errors (cli.py:68,108). Notably the GUI's api_config already wraps the identical conversions in try/except returning a 400 (gui.py:463-484), so the CLI is the inconsistent one. Minor, valid.",
+      "your_miss": false
+    }
+  ],
+  "new_findings": [
+    {
+      "id": "DA1",
+      "severity": "minor",
+      "file": "src/pz_save_manager/gui.py",
+      "line": 432,
+      "category": "bug",
+      "title": "Configured debounce_seconds is never applied by any watch path",
+      "description": "B6/B7 focus on cooldown, but neither the bulk toggle (api_watcher_toggle, line 430-432 passes only backup_cooldown_seconds) nor the per-save toggle (api_watcher_save, line 451) ever passes debounce_seconds from config. config exposes/accepts debounce_seconds (cli.py:166, gui api_config:471), but every manager.watch() call falls back to the hardcoded 5.0s default (watcher.py:147). So a user-tuned debounce is silently ignored on all code paths, not just the per-save one B6 flagged.",
+      "suggestion": "Read debounce_seconds from config_get_all() and pass it to manager.watch() in both api_watcher_toggle and api_watcher_save, alongside the cooldown fix from B6."
+    }
+  ],
+  "summary": "10 validated, 1 challenged (B2 — shutil.Error subclasses OSError in Py3, so it is already caught), 1 new finding added (configured debounce never applied on any watch path). B5 validated but downgraded to latent (all current callers use default roots)."
+}
+```

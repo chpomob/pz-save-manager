@@ -1,0 +1,126 @@
+{
+  "responses": [
+    {
+      "finding_id": "B1",
+      "action": "validate",
+      "rationale": "The destination directory is created before the backup is complete, and contents are moved into it item by item. Normal exceptions remove it, but process death bypasses cleanup, leaving an empty or partial directory that list/get/restore accept.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B2",
+      "action": "validate",
+      "rationale": "list_backups accepts every directory under the save backup folder. That includes .tmp-* directories and the pre-created destination during an in-progress backup or after a crash.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B3",
+      "action": "validate",
+      "rationale": "The bulk watcher path passes only cooldown, the per-save path passes neither cooldown nor debounce, and WatcherManager defaults conflict with config.DEFAULTS. The .get(..., 5) fallback is mostly unreachable through get_all(), but the config plumbing is still inconsistent.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B4",
+      "action": "validate",
+      "rationale": "index() builds detailed rows for every backup, including player_info SQLite reads and note reads, before the template slices to 50. The count can be preserved without doing per-backup detail work for discarded rows.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B5",
+      "action": "validate",
+      "rationale": "_save_info computes a per-save backups list, but PAGE never references save.backups. That is avoidable directory walking on the main page render path.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B6",
+      "action": "validate",
+      "rationale": "config_command converts numeric values directly with float/int and does not catch ValueError. Non-numeric input will escape as an unhandled exception instead of a ClickException.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B7",
+      "action": "validate",
+      "rationale": "_do_backup holds self._lock while create_backup copies the whole save. That blocks on_modified, pause, cancel_pending, and resume. The exact grace-window wording is debatable, but the lock scope is a real concurrency/performance issue.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B8",
+      "action": "challenge",
+      "rationale": "This is overstated. If the target contains real backups, it is non-empty and rename fails on both POSIX and Windows, so histories are not silently merged. POSIX replacing an existing empty directory is platform-dependent and worth making explicit, but that empty directory is not itself a backup history.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B9",
+      "action": "validate",
+      "rationale": "The initial total/vanilla/modded assignments are overwritten before being read. This is dead code.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B10",
+      "action": "validate",
+      "rationale": "_should_skip is annotated as bool but returns a re.Match or None through the chained regex calls. It works in truthiness checks but violates the annotation.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B11",
+      "action": "validate",
+      "rationale": "callable is the builtin predicate, not a callable type annotation. Callable[[BackupRecord], None] | None is the correct type.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B12",
+      "action": "validate",
+      "rationale": "The flask import in gui_command's --no-browser branch is unused. The branch imports app separately and never references flask.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B13",
+      "action": "validate",
+      "rationale": "player_info maps NULL coordinates to 0, so the GUI can display an unknown position as the origin. An explicit None check would preserve the distinction.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B14",
+      "action": "validate",
+      "rationale": "The debounce test only checks that _last_event changed. Since create_backup is not patched and may fail silently, it does not verify that debounce actually creates or suppresses backups.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B15",
+      "action": "validate",
+      "rationale": "The file replacement is atomic, but set_ performs an unsynchronized load-modify-save sequence. Concurrent config writes can overwrite each other. A concurrent read alone is not a lost-update issue, but concurrent writes are.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B16",
+      "action": "validate",
+      "rationale": "The 'can raise' claim is likely overstated on CPython for list copying, but get_backups still reads protected mutable state without the watcher's lock and can return a racey snapshot.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B17",
+      "action": "validate",
+      "rationale": "The ASCII fallback can turn arbitrary binary bytes into a plausible-looking map name. Returning None when confidence is low would be safer.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B18",
+      "action": "challenge",
+      "rationale": "This is not a demonstrated bug. watch() schedules on a non-alive Observer even in the normal fresh-manager path before start(), and start() recreates the Observer and reschedules from _watchers. Without evidence that watchdog raises or starts emitters when not alive, this is at most unnecessary bookkeeping.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B19",
+      "action": "validate",
+      "rationale": "The underscore loop variable is dereferenced in both file_count and size_mb. Renaming it would improve readability and avoid the conventional 'unused' signal.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B20",
+      "action": "validate",
+      "rationale": "On modern Werkzeug the shutdown environ hook is absent, so the timer falls back to os._exit. That can bypass cleanup and interrupt other request threads doing write operations.",
+      "your_miss": false
+    }
+  ],
+  "new_findings": [],
+  "summary": "18 validated, 2 challenged, 0 new findings added"
+}

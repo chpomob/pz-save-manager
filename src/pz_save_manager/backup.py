@@ -264,7 +264,8 @@ def get_backup(
     path = _backup_path(game_mode, save_name, timestamp, backups_root)
     if not path.is_dir():
         raise BackupNotFound(f"Backup not found: {game_mode}/{save_name}/{timestamp}")
-    return BackupRecord(game_mode, save_name, timestamp, path)
+    auto = (path / _AUTO_FILE).is_file()
+    return BackupRecord(game_mode, save_name, timestamp, path, auto=auto)
 
 
 def restore_backup(
@@ -354,11 +355,12 @@ def rename_backups_for_save(
     """
     _validate_component(game_mode, "game mode")
     _validate_component(old_save_name, "old save name")
-    _validate_component(new_save_name, "new save name")
+    normalized_new_name = new_save_name.strip()
+    _validate_component(normalized_new_name, "new save name")
 
     root = _root(backups_root, get_backups_root())
     old_dir = root / game_mode / old_save_name
-    new_dir = root / game_mode / new_save_name
+    new_dir = root / game_mode / normalized_new_name
 
     if not old_dir.is_dir():
         return 0

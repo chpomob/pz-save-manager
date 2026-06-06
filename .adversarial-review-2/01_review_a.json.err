@@ -1,0 +1,4207 @@
+Reading prompt from stdin...
+OpenAI Codex v0.133.0
+--------
+workdir: /home/chpo/pz-save-manager
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019e9e38-e4e0-7291-b626-0ed6d8eb626d
+--------
+user
+You are an **Architect Reviewer**. Analyze code architecture, security, and invariants.
+
+## Your mission
+Find structural and high-impact issues. Think like a principal engineer doing a deep-dive review.
+
+## What to look for (priority order)
+1. **Architecture**: coupling, cohesion, abstraction levels, SOLID violations
+2. **Security**: injection vulnerabilities, auth bypasses, data leaks, privilege escalation
+3. **Concurrency**: race conditions, deadlocks, thread safety, atomicity
+4. **Invariants**: broken assumptions, inconsistent state, corrupted data flows
+5. **Design**: wrong abstraction, over-engineering, leaky encapsulation, API design flaws
+
+## Output format (JSON only — no markdown wrapper)
+{
+  "findings": [
+    {
+      "id": "A1",
+      "severity": "blocker|major|minor|nit",
+      "file": "path/to/file.py",
+      "line": 42,
+      "category": "architecture|security|concurrency|design",
+      "title": "Short title",
+      "description": "Detailed explanation of the problem",
+      "suggestion": "How to fix it"
+    }
+  ],
+  "overall_assessment": "Overall quality assessment",
+  "verdict": "APPROVE|REQUEST_CHANGES|REJECT",
+  "summary": "2 blockers, 3 majors — architecture needs rework"
+}
+
+## Rules
+- Be specific: mention file paths and line numbers when possible
+- Be critical: this code was written by someone else, and your job is to find what's wrong
+- Be constructive: every finding must include a suggestion for improvement
+- Stay in your lane: focus on architecture/security/design — let the other reviewer handle style and minor bugs
+
+Code to review:
+
+
+# File: /tmp/pz-review/scripts/pz_save_manager_app.py
+"""PyInstaller entry point — launches the GUI directly when the bundled exe runs."""
+
+from pz_save_manager.gui import run_gui
+
+
+if __name__ == "__main__":
+    run_gui()
+
+
+# File: /tmp/pz-review/src/pz_save_manager/__init__.py
+"""
+PZ Save Manager — Gestionnaire de sauvegardes pour Project Zomboid.
+"""
+
+__version__ = "0.1.5"
+
+
+# File: /tmp/pz-review/src/pz_save_manager/__main__.py
+"""Module entry point so `python -m pz_save_manager` works."""
+
+from .cli import main
+
+if __name__ == "__main__":
+    main()
+
+
+# File: /tmp/pz-review/src/pz_save_manager/backup.py
+"""Backup and restore operations for full Project Zomboid save directories."""
+
+from __future__ import annotations
+
+import shutil
+import tempfile
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from uuid import uuid4
+
+from .platforms import get_backups_root, get_saves_root
+from .saves import SaveGame, SaveManagerError, get_save
+
+INTERNAL_FILES = {".pz-note", ".pz-auto"}
+_INTERNAL_PREFIX = ".pz-"
+
+
+class BackupError(SaveManagerError):
+    """Base error for backup operations."""
+
+
+class BackupNotFound(BackupError):
+    """Raised when a backup directory cannot be found."""
+
+
+@dataclass(frozen=True)
+class BackupRecord:
+    """A full-directory save backup."""
+
+    game_mode: str
+    save_name: str
+    timestamp: str
+    path: Path
+    auto: bool = False
+
+    @property
+    def display_name(self) -> str:
+        return f"{self.game_mode}/{self.save_name}/{self.timestamp}"
+
+    @property
+    def file_count(self) -> int:
+        try:
+            return sum(1 for _ in self.path.rglob("*") if _.is_file())
+        except OSError:
+            return 0
+
+    @property
+    def size_mb(self) -> float:
+        try:
+            total = sum(_.stat().st_size for _ in self.path.rglob("*") if _.is_file())
+            return round(total / (1024 * 1024), 1)
+        except OSError:
+            return 0.0
+
+    @property
+    def age(self) -> str:
+        """Human-readable relative time (e.g. '3 hours ago')."""
+        try:
+            dt = datetime.strptime(self.timestamp, "%Y%m%d-%H%M%S")
+        except ValueError:
+            return self.timestamp
+        delta = datetime.now() - dt
+        seconds = delta.total_seconds()
+        if seconds < 60:
+            return "just now"
+        mins = int(seconds / 60)
+        if mins < 60:
+            return f"{mins} min ago"
+        hours = int(mins / 60)
+        if hours < 24:
+            return f"{hours}h ago"
+        days = int(hours / 24)
+        if days < 7:
+            return f"{days}d ago"
+        weeks = int(days / 7)
+        if weeks < 5:
+            return f"{weeks}w ago"
+        return dt.strftime("%d/%m/%Y")
+
+    @property
+    def formatted(self) -> str:
+        """Human-readable date/time (e.g. '2026-05-18 12:11:48')."""
+        try:
+            dt = datetime.strptime(self.timestamp, "%Y%m%d-%H%M%S")
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return self.timestamp
+
+    @property
+    def note(self) -> str | None:
+        """User annotation stored alongside the backup (read lazily)."""
+        return get_backup_note(self.path)
+
+    def set_note(self, text: str) -> None:
+        """Annotate this backup. Pass empty string to remove the note."""
+        set_backup_note(self.path, text)
+
+
+_NOTE_FILE = ".pz-note"
+_AUTO_FILE = ".pz-auto"
+
+
+def get_backup_note(backup_path: Path) -> str | None:
+    """Read the annotation for a backup, or None."""
+    note_file = backup_path / _NOTE_FILE
+    if not note_file.is_file():
+        return None
+    try:
+        return note_file.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def set_backup_note(backup_path: Path, text: str) -> None:
+    """Write or remove an annotation for a backup."""
+    note_file = backup_path / _NOTE_FILE
+    text = text.strip()
+    if not text:
+        try:
+            note_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+    note_file.write_text(text, encoding="utf-8")
+
+
+def _root(path: Path | str | None, default: Path) -> Path:
+    return Path(path).expanduser() if path is not None else default
+
+
+def _validate_component(value: str, label: str) -> None:
+    if value in {"", ".", ".."} or "/" in value or chr(92) in value or "\x00" in value:
+        raise BackupError(f"Invalid {label}: {value!r}")
+
+
+def _backup_path(game_mode: str, save_name: str, timestamp: str, backups_root: Path | str | None) -> Path:
+    _validate_component(game_mode, "game mode")
+    _validate_component(save_name, "save name")
+    _validate_component(timestamp, "timestamp")
+    return _root(backups_root, get_backups_root()) / game_mode / save_name / timestamp
+
+
+def _timestamp(now: datetime | None = None) -> str:
+    return (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
+
+
+def _skip_symlinks_and_internal(d: str, names: list[str]) -> list[str]:
+    return [
+        name
+        for name in names
+        if (Path(d) / name).is_symlink()
+        or name in INTERNAL_FILES
+        or name.startswith(_INTERNAL_PREFIX)
+    ]
+
+
+def _unique_destination(base_dir: Path, timestamp: str) -> tuple[str, Path]:
+    # P0: TOCTOU-safe — reserve via atomic mkdir, then caller copies into it
+    destination = base_dir / timestamp
+    try:
+        destination.mkdir(parents=True, exist_ok=False)
+        return timestamp, destination
+    except FileExistsError:
+        pass
+    for index in range(1, 100):
+        candidate_timestamp = f"{timestamp}-{index:02d}"
+        candidate = base_dir / candidate_timestamp
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate_timestamp, candidate
+        except FileExistsError:
+            continue
+    raise BackupError(f"Could not allocate a unique backup under {base_dir}")
+
+
+def create_backup(
+    game_mode: str,
+    save_name: str,
+    *,
+    saves_root: Path | str | None = None,
+    backups_root: Path | str | None = None,
+    now: datetime | None = None,
+    auto: bool = False,
+) -> BackupRecord:
+    """Create a timestamped full backup for a save directory."""
+    _validate_component(game_mode, "game mode")
+    _validate_component(save_name, "save name")
+    if now is None:
+        now = datetime.now()
+    save = get_save(game_mode, save_name, saves_root=saves_root)
+    backup_base = _root(backups_root, get_backups_root()) / game_mode / save_name
+    backup_base.mkdir(parents=True, exist_ok=True)
+    timestamp, destination = _unique_destination(backup_base, _timestamp(now))
+    # P0: copy to temp inside destination, then atomically move contents
+    tmp = Path(tempfile.mkdtemp(dir=destination.parent, prefix=f".tmp-{timestamp}-"))
+    try:
+        shutil.copytree(save.path, tmp, copy_function=shutil.copy2,
+                        ignore=_skip_symlinks_and_internal, dirs_exist_ok=True)
+        # Atomic: move all contents from tmp into destination
+        for item in tmp.iterdir():
+            shutil.move(str(item), str(destination / item.name))
+    except Exception:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    # Persist auto/manual marker
+    if auto:
+        try:
+            (destination / _AUTO_FILE).touch()
+        except OSError:
+            pass
+    result = BackupRecord(game_mode, save_name, timestamp, destination, auto=auto)
+    # Prune excess auto-backups (manual backups are never pruned)
+    if auto:
+        from .config import get as config_get
+        max_auto = config_get("max_auto_backups")
+        if isinstance(max_auto, (int, float)) and max_auto >= 0:
+            prune_auto_backups(game_mode, save_name, int(max_auto), backups_root=backups_root)
+    return result
+
+
+def list_backups(
+    game_mode: str | None = None,
+    save_name: str | None = None,
+    *,
+    backups_root: Path | str | None = None,
+) -> list[BackupRecord]:
+    """List backups, optionally filtered by game mode and save name."""
+    if save_name is not None and game_mode is None:
+        raise BackupError("A game mode is required when filtering by save name")
+    root = _root(backups_root, get_backups_root())
+    if not root.is_dir():
+        return []
+    records: list[BackupRecord] = []
+    mode_dirs = [root / game_mode] if game_mode else [path for path in root.iterdir() if path.is_dir()]
+    for mode_dir in mode_dirs:
+        if not mode_dir.is_dir():
+            continue
+        save_dirs = [mode_dir / save_name] if save_name else [path for path in mode_dir.iterdir() if path.is_dir()]
+        for save_dir in save_dirs:
+            if not save_dir.is_dir():
+                continue
+            for backup_dir in save_dir.iterdir():
+                if backup_dir.is_dir():
+                    auto = (backup_dir / _AUTO_FILE).is_file()
+                    records.append(BackupRecord(mode_dir.name, save_dir.name, backup_dir.name, backup_dir, auto=auto))
+    return sorted(
+        records,
+        key=lambda backup: (backup.game_mode.casefold(), backup.save_name.casefold(), backup.timestamp),
+        reverse=True,
+    )
+
+
+def get_backup(
+    game_mode: str,
+    save_name: str,
+    timestamp: str,
+    *,
+    backups_root: Path | str | None = None,
+) -> BackupRecord:
+    """Return a specific backup or raise BackupNotFound."""
+    path = _backup_path(game_mode, save_name, timestamp, backups_root)
+    if not path.is_dir():
+        raise BackupNotFound(f"Backup not found: {game_mode}/{save_name}/{timestamp}")
+    return BackupRecord(game_mode, save_name, timestamp, path)
+
+
+def restore_backup(
+    game_mode: str,
+    save_name: str,
+    timestamp: str,
+    *,
+    saves_root: Path | str | None = None,
+    backups_root: Path | str | None = None,
+) -> SaveGame:
+    """Restore a backup over the live save directory."""
+    backup = get_backup(game_mode, save_name, timestamp, backups_root=backups_root)
+    target = _root(saves_root, get_saves_root()) / game_mode / save_name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_target = target.with_name(f".{target.name}.restore-{uuid4().hex}.tmp")
+    previous_target = target.with_name(f".{target.name}.restore-old-{uuid4().hex}")
+    try:
+        shutil.copytree(backup.path, temp_target, copy_function=shutil.copy2,
+                        ignore=_skip_symlinks_and_internal)
+        if target.exists():
+            target.rename(previous_target)
+        temp_target.rename(target)
+    except OSError as exc:
+        if temp_target.exists():
+            shutil.rmtree(temp_target, ignore_errors=True)
+        if previous_target.exists() and not target.exists():
+            previous_target.rename(target)
+        raise BackupError(f"Could not restore backup: {exc}") from exc
+    # P0: cleanup wrapped in try/except — failure here must not lose the restored save
+    try:
+        if previous_target.exists():
+            shutil.rmtree(previous_target)
+    except OSError as e:
+        import logging
+        logging.getLogger(__name__).warning("Could not remove previous save backup %s: %s", previous_target, e)
+    return SaveGame(game_mode, save_name, target)
+
+
+def delete_backup(
+    game_mode: str,
+    save_name: str,
+    timestamp: str,
+    *,
+    backups_root: Path | str | None = None,
+) -> BackupRecord:
+    """Delete a backup directory."""
+    backup = get_backup(game_mode, save_name, timestamp, backups_root=backups_root)
+    try:
+        shutil.rmtree(backup.path)
+    except OSError as exc:
+        raise BackupError(f"Could not delete backup: {exc}") from exc
+    return backup
+
+
+def preflight_rename(
+    game_mode: str,
+    old_save_name: str,
+    new_save_name: str,
+    *,
+    backups_root: Path | str | None = None,
+) -> None:
+    """Validate backup-side rename constraints before renaming the live save."""
+    _validate_component(game_mode, "game mode")
+    _validate_component(old_save_name, "old save name")
+    normalized_new_name = new_save_name.strip()
+    _validate_component(normalized_new_name, "new save name")
+
+    root = _root(backups_root, get_backups_root())
+    old_dir = root / game_mode / old_save_name
+    new_dir = root / game_mode / normalized_new_name
+    if new_dir != old_dir and new_dir.is_dir():
+        raise BackupError(f"Cannot rename backups: {normalized_new_name!r} already has backups")
+
+
+def rename_backups_for_save(
+    game_mode: str,
+    old_save_name: str,
+    new_save_name: str,
+    *,
+    backups_root: Path | str | None = None,
+) -> int:
+    """Move all backups from old_save_name to new_save_name under game_mode.
+
+    Returns the number of backups moved.  If no backups exist for the old
+    name this is a no-op (returns 0).  Raises BackupError if the new name
+    already has backups (to avoid silently merging two histories).
+    """
+    _validate_component(game_mode, "game mode")
+    _validate_component(old_save_name, "old save name")
+    _validate_component(new_save_name, "new save name")
+
+    root = _root(backups_root, get_backups_root())
+    old_dir = root / game_mode / old_save_name
+    new_dir = root / game_mode / new_save_name
+
+    if not old_dir.is_dir():
+        return 0
+
+    # Count backups before moving
+    count = sum(1 for _ in old_dir.iterdir() if _.is_dir())
+    try:
+        old_dir.rename(new_dir)
+    except OSError as e:
+        raise BackupError(
+            f"Cannot rename backups: {old_save_name!r} → {new_save_name!r}: {e}"
+        ) from e
+    return count
+
+
+def prune_auto_backups(
+    game_mode: str,
+    save_name: str,
+    max_count: int,
+    *,
+    backups_root: Path | str | None = None,
+) -> int:
+    """Delete the oldest auto-backups so at most `max_count` remain.
+
+    Manual backups (no .pz-auto marker) are never deleted.  Returns the
+    number of auto-backups removed.
+    """
+    if max_count <= 0:
+        return 0
+    root = _root(backups_root, get_backups_root())
+    save_dir = root / game_mode / save_name
+    if not save_dir.is_dir():
+        return 0
+
+    # Collect auto-backup directories with their timestamps
+    autos: list[tuple[str, Path]] = []
+    for item in save_dir.iterdir():
+        if item.is_dir() and (item / _AUTO_FILE).is_file():
+            autos.append((item.name, item))
+
+    if len(autos) <= max_count:
+        return 0
+
+    # Sort by timestamp (oldest first) so we delete the oldest
+    autos.sort(key=lambda x: x[0])
+    to_delete = autos[: len(autos) - max_count]
+
+    removed = 0
+    for _, path in to_delete:
+        try:
+            shutil.rmtree(path)
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+# File: /tmp/pz-review/src/pz_save_manager/cli.py
+"""Click command line interface for PZ Save Manager."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+
+import click
+from rich.console import Console
+from rich.table import Table
+
+from .backup import BackupError, BackupNotFound, create_backup, delete_backup, list_backups, restore_backup
+from .gui import run_gui
+from .platforms import get_backups_root, get_saves_root
+from .saves import SaveNotFound, get_save_modified_time, list_saves
+
+
+console = Console()
+
+
+def _path_option(value: str | None) -> Path | None:
+    return Path(value).expanduser() if value else None
+
+
+@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+@click.option("--saves-dir", type=click.Path(file_okay=False, dir_okay=True), help="Override the Project Zomboid saves directory.")
+@click.option("--backups-dir", type=click.Path(file_okay=False, dir_okay=True), help="Override the backup storage directory.")
+@click.pass_context
+def main(ctx: click.Context, saves_dir: str | None, backups_dir: str | None) -> None:
+    """Manage Project Zomboid save backups."""
+    ctx.ensure_object(dict)
+    ctx.obj["saves_root"] = _path_option(saves_dir) or get_saves_root()
+    ctx.obj["backups_root"] = _path_option(backups_dir) or get_backups_root()
+
+
+@main.command("list")
+@click.pass_context
+def list_saves_command(ctx: click.Context) -> None:
+    """List discovered Project Zomboid saves."""
+    saves_root: Path = ctx.obj["saves_root"]
+    saves = list_saves(saves_root)
+    if not saves:
+        if saves_root.exists():
+            console.print(f"[yellow]No saves found in {saves_root}[/yellow]")
+        else:
+            console.print(f"[yellow]Project Zomboid saves directory not found: {saves_root}[/yellow]")
+        return
+
+    table = Table(title="Project Zomboid Saves")
+    table.add_column("Game Mode", style="cyan")
+    table.add_column("Save")
+    table.add_column("Modified")
+    table.add_column("Path", overflow="fold")
+    for save in saves:
+        modified = datetime.fromtimestamp(get_save_modified_time(save)).strftime("%Y-%m-%d %H:%M:%S")
+        table.add_row(save.game_mode, save.name, modified, str(save.path))
+    console.print(table)
+
+
+@main.command("backup")
+@click.argument("game_mode")
+@click.argument("save_name")
+@click.pass_context
+def backup_command(ctx: click.Context, game_mode: str, save_name: str) -> None:
+    """Create a timestamped backup for a save."""
+    try:
+        backup = create_backup(game_mode, save_name, saves_root=ctx.obj["saves_root"], backups_root=ctx.obj["backups_root"])
+    except (SaveNotFound, BackupError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print(f"[green]Backup created:[/green] {backup.path}")
+
+
+@main.command("list-backups")
+@click.argument("game_mode", required=False)
+@click.argument("save_name", required=False)
+@click.pass_context
+def list_backups_command(ctx: click.Context, game_mode: str | None, save_name: str | None) -> None:
+    """List available backups."""
+    try:
+        backups = list_backups(game_mode, save_name, backups_root=ctx.obj["backups_root"])
+    except BackupError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not backups:
+        console.print("[yellow]No backups found.[/yellow]")
+        return
+    table = Table(title="Project Zomboid Backups")
+    table.add_column("Game Mode", style="cyan")
+    table.add_column("Save")
+    table.add_column("Timestamp")
+    table.add_column("Path", overflow="fold")
+    for backup in backups:
+        table.add_row(backup.game_mode, backup.save_name, backup.timestamp, str(backup.path))
+    console.print(table)
+
+
+@main.command("restore")
+@click.argument("game_mode")
+@click.argument("save_name")
+@click.argument("timestamp")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation.")
+@click.pass_context
+def restore_command(ctx: click.Context, game_mode: str, save_name: str, timestamp: str, yes: bool) -> None:
+    """Restore a save from a backup timestamp."""
+    if not yes:
+        click.confirm(f"Restore {game_mode}/{save_name} from {timestamp}? The current save directory will be replaced.", abort=True)
+    try:
+        save = restore_backup(game_mode, save_name, timestamp, saves_root=ctx.obj["saves_root"], backups_root=ctx.obj["backups_root"])
+    except (BackupNotFound, BackupError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print(f"[green]Save restored:[/green] {save.path}")
+
+
+@main.command("delete")
+@click.argument("game_mode")
+@click.argument("save_name")
+@click.argument("timestamp")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation.")
+@click.pass_context
+def delete_command(ctx: click.Context, game_mode: str, save_name: str, timestamp: str, yes: bool) -> None:
+    """Delete a backup timestamp."""
+    if not yes:
+        click.confirm(f"Delete backup {game_mode}/{save_name}/{timestamp}?", abort=True)
+    try:
+        backup = delete_backup(game_mode, save_name, timestamp, backups_root=ctx.obj["backups_root"])
+    except (BackupNotFound, BackupError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print(f"[green]Backup deleted:[/green] {backup.display_name}")
+
+
+@main.command("gui")
+@click.option("--host", default="127.0.0.1", help="Host to bind to.")
+@click.option("--port", default=8080, type=int, help="Port to listen on.")
+@click.option("--no-browser", is_flag=True, help="Don't open browser automatically.")
+def gui_command(host: str, port: int, no_browser: bool) -> None:
+    """Launch the web GUI."""
+    if no_browser:
+        import flask
+        # We still want the GUI but without browser open
+        from .gui import app
+        print(f"\n  🧟 PZ Save Manager — http://{host}:{port}\n")
+        app.run(host=host, port=port, debug=False)
+    else:
+        run_gui(host, port)
+
+
+@main.command("config")
+@click.argument("key", required=False)
+@click.argument("value", required=False)
+def config_command(key: str | None, value: str | None) -> None:
+    """View or set configuration. 'pz-saves config' shows all."""
+    from .config import get_all, set_
+
+    if key is None:
+        cfg = get_all()
+        console.print("[bold]Configuration:[/bold]")
+        for k, v in cfg.items():
+            console.print(f"  {k}: {v}")
+        return
+
+    if value is None:
+        from .config import get
+        console.print(f"{key} = {get(key)}")
+        return
+
+    # Convert types
+    if key == "debounce_seconds":
+        value = float(value)  # type: ignore
+    elif key == "backup_cooldown_minutes":
+        value = int(value)  # type: ignore
+    elif key == "max_auto_backups":
+        value = int(value)  # type: ignore
+    elif key == "port":
+        value = int(value)  # type: ignore
+    elif key in ("auto_start_watcher",):
+        value = value.lower() in ("true", "1", "yes")  # type: ignore
+    elif key == "backups_dir" and value in ("", "none", "null"):
+        value = None  # type: ignore
+
+    set_(key, value)
+    console.print(f"[green]{key} = {value}[/green]")
+
+
+@main.command("rename")
+@click.argument("game_mode")
+@click.argument("old_name")
+@click.argument("new_name")
+@click.pass_context
+def rename_command(ctx: click.Context, game_mode: str, old_name: str, new_name: str) -> None:
+    """Rename a save (and move its backups)."""
+    from .saves import SaveManagerError, rename_save
+    from .backup import BackupError, preflight_rename, rename_backups_for_save
+    try:
+        preflight_rename(game_mode, old_name, new_name, backups_root=ctx.obj["backups_root"])
+        new_save = rename_save(game_mode, old_name, new_name, saves_root=ctx.obj["saves_root"])
+        n = rename_backups_for_save(game_mode, old_name, new_name, backups_root=ctx.obj["backups_root"])
+    except (SaveManagerError, BackupError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print(f"[green]Saved renamed to[/green] {new_save.name}")
+    if n:
+        console.print(f"[dim]{n} backup(s) moved[/dim]")
+
+
+@main.command("annotate")
+@click.argument("game_mode")
+@click.argument("save_name")
+@click.argument("timestamp")
+@click.argument("note", required=False)
+@click.pass_context
+def annotate_command(ctx: click.Context, game_mode: str, save_name: str, timestamp: str, note: str | None) -> None:
+    """Add or read a note on a backup. Omit note to read existing."""
+    from .backup import BackupNotFound, get_backup, get_backup_note, set_backup_note
+    try:
+        backup = get_backup(game_mode, save_name, timestamp, backups_root=ctx.obj["backups_root"])
+    except BackupNotFound as exc:
+        raise click.ClickException(str(exc)) from exc
+    if note is None:
+        existing = get_backup_note(backup.path)
+        if existing:
+            console.print(existing)
+        else:
+            console.print("[dim](no note)[/dim]")
+    else:
+        set_backup_note(backup.path, note)
+        console.print(f"[green]Note saved for[/green] {backup.display_name}")
+
+
+@main.command("install")
+def install_command() -> None:
+    """Create desktop shortcuts and launchers."""
+    from .installer import install
+    install()
+
+
+main.add_command(list_saves_command, "list-saves")
+
+
+# File: /tmp/pz-review/src/pz_save_manager/config.py
+"""Configuration management for PZ Save Manager.
+
+Config stored in ~/.pz-save-manager/config.json
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+from pathlib import Path
+
+from .platforms import get_app_dir
+
+CONFIG_FILE = get_app_dir() / "config.json"
+
+DEFAULTS = {
+    "backups_dir": None,
+    "debounce_seconds": 5.0,
+    "backup_cooldown_minutes": 1,
+    "max_auto_backups": 30,
+    "auto_start_watcher": False,
+    "port": 8080,
+}
+
+
+def _load() -> dict:
+    if CONFIG_FILE.is_file():
+        try:
+            return json.loads(CONFIG_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save(data: dict) -> None:
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    # Atomic write: write to temp file in the same directory, then replace.
+    # This prevents corruption if the process is killed mid-write.
+    fd, tmp_path = tempfile.mkstemp(
+        suffix=".tmp", prefix=".config-", dir=str(CONFIG_FILE.parent)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, CONFIG_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def get(key: str):
+    """Get a config value, falling back to defaults."""
+    data = _load()
+    if key in data:
+        return data[key]
+    return DEFAULTS.get(key)
+
+
+def set_(key: str, value) -> None:
+    """Set a config value and save."""
+    data = _load()
+    data[key] = value
+    _save(data)
+
+
+def get_all() -> dict:
+    """Return all config with defaults filled in."""
+    result = dict(DEFAULTS)
+    result.update(_load())
+    return result
+
+
+def get_backups_dir() -> Path | None:
+    """Return custom backup dir or None for default."""
+    val = get("backups_dir")
+    if val:
+        return Path(val).expanduser()
+    return None
+
+
+# File: /tmp/pz-review/src/pz_save_manager/gui.py
+"""Flask web GUI for PZ Save Manager — compact cards + expandable detail."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from html import escape
+from pathlib import Path
+
+from flask import Flask, jsonify, render_template_string, request, send_file
+
+from .backup import BackupError, BackupNotFound, create_backup, delete_backup, get_backup, get_backup_note, list_backups, restore_backup, set_backup_note
+from .config import get_all as config_get_all, set_ as config_set
+from .platforms import get_backups_root, get_saves_root
+from .save_info import extract_all, player_info
+from .saves import SaveGame, SaveNotFound, get_save_modified_time, list_saves
+from .watcher import WatcherManager, get_manager
+
+app = Flask(__name__)
+
+PAGE = """<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PZ Save Manager</title>
+<style>
+:root{--bg:#0d0d0d;--surface:#1a1a2e;--card:#16213e;--accent:#e94560;--accent2:#0f3460;--text:#eaeaea;--muted:#8892b0;--radius:10px;--green:#2ecc71;--red:#e74c3c;--yellow:#f39c12;--dead:#7f8c8d}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+header{background:var(--surface);padding:1rem 2rem;display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid var(--accent)}
+header h1{font-size:1.3rem;font-weight:700}header h1 span{color:var(--accent)}
+.status{display:flex;gap:1rem;align-items:center;font-size:.82rem}
+.badge{background:var(--accent2);padding:.3rem .7rem;border-radius:20px;font-weight:500}
+.badge.on{background:var(--green);color:#000}.badge.off{background:var(--accent2)}
+.container{max-width:900px;margin:0 auto;padding:1.5rem}
+h2{font-size:1rem;margin-bottom:.8rem;color:var(--accent);text-transform:uppercase;letter-spacing:1px;padding:.4rem 0;border-bottom:1px solid rgba(255,255,255,.08)}
+h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weight:500}
+/* Compact card */
+.card{background:var(--card);border-radius:var(--radius);border:1px solid rgba(255,255,255,.05);margin-bottom:.7rem;overflow:hidden;transition:border .15s}
+.card:hover{border-color:rgba(255,255,255,.15)}
+.card-header{display:flex;align-items:center;padding:.7rem .9rem;cursor:pointer;gap:.6rem;user-select:none;overflow:hidden}
+.card-header .thumb{width:48px;height:36px;border-radius:4px;object-fit:cover;flex-shrink:0;background:var(--accent2)}
+.card-header .info{flex:1 1 0;min-width:0;overflow:hidden}
+.card-header .info .name{font-weight:600;font-size:.85rem;white-space:normal;word-break:break-word;max-width:100%;display:block}
+.card-header .info .sub{font-size:.7rem;color:var(--muted);margin-top:1px;white-space:normal;word-break:break-word;max-width:100%;display:block}
+.card-header .status-dot{width:12px;height:12px;border-radius:50%;flex-shrink:0}
+.status-alive{background:var(--green);box-shadow:0 0 8px var(--green)}
+.status-dead{background:var(--dead)}
+.status-unknown{background:var(--yellow)}
+.card-header .arrow{color:var(--muted);font-size:1.2rem;transition:transform .2s;flex-shrink:0}
+.card.open .card-header .arrow{transform:rotate(180deg)}
+/* Detail panel */
+.card-body{display:none;padding:0 1rem 1rem;border-top:1px solid rgba(255,255,255,.06)}
+.card.open .card-body{display:block}
+.card-body .detail-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:.5rem;margin-bottom:.8rem}
+.detail-item{font-size:.8rem;color:var(--muted)}
+.detail-item strong{color:var(--text);display:block}
+.backup-list{border-top:1px solid rgba(255,255,255,.06);padding-top:.6rem;margin-top:.5rem}
+.backup-item{display:flex;justify-content:space-between;align-items:center;padding:.3rem 0;font-size:.78rem}
+.backup-item .ts{font-family:monospace;color:var(--muted);margin-right:1rem}
+.btn{padding:.4rem .85rem;border:none;border-radius:6px;cursor:pointer;font-size:.78rem;font-weight:600;transition:filter .15s}
+.btn:hover{filter:brightness(1.15)}.btn:active{transform:translateY(1px)}
+.btn-accent{background:var(--accent);color:#fff}.btn-green{background:var(--green);color:#000}.btn-red{background:var(--red);color:#fff}
+.help{display:inline-block;width:16px;height:16px;line-height:16px;text-align:center;border-radius:50%;background:var(--accent2);color:var(--text);font-size:.65rem;font-weight:700;cursor:help;margin-left:4px;vertical-align:middle}
+.btn-sm{padding:.25rem .6rem;font-size:.72rem}
+.actions{display:flex;gap:.4rem;margin-top:.5rem;flex-wrap:wrap}
+.empty{text-align:center;padding:3rem;color:var(--muted)}
+.toast{position:fixed;bottom:1rem;right:1rem;background:var(--green);color:#000;padding:.7rem 1.2rem;border-radius:var(--radius);font-weight:600;z-index:99;animation:slidein .3s ease}
+@keyframes slidein{from{transform:translateY(60px);opacity:0}to{transform:translateY(0);opacity:1}}
+</style>
+</head>
+<body>
+<header>
+<h1>🧟 <span>PZ</span> Save Manager</h1>
+<div class="status">
+<span>Watcher: <span class="badge {{'on' if watcher_running else 'off'}}">{{'RUNNING' if watcher_running else 'STOPPED'}}</span></span>
+<button class="btn btn-sm {{'btn-red' if watcher_running else 'btn-green'}}" onclick="toggleWatcher()">{{'Stop' if watcher_running else 'Start'}} Watcher</button>
+<button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick="toggleSettings()">⚙</button>
+<button class="btn btn-sm btn-red" onclick="shutdown()" title="Close app">✕</button>
+</div>
+</header>
+<div class="container">
+<h2>📁 Saves ({{saves|length}})</h2>
+{% if not saves %}<div class="empty">No saves found. Launch Project Zomboid!</div>{% endif %}
+<div class="grid">
+{% for save in saves %}
+<div class="card" id="save-{{loop.index}}">
+<div class="card-header" onclick="this.parentElement.classList.toggle('open')">
+{% if save.has_thumbnail %}<img src="/thumb/{{save.game_mode}}/{{save.full_name}}" class="thumb" loading="lazy">{% else %}<div class="thumb"></div>{% endif %}
+<div class="info">
+<div class="name" title="{{save.full_name}}">{{save.name}}</div>
+<div class="sub">{{save.game_mode}} · {{save.modified}}</div>
+</div>
+<div class="status-dot {% if save.player_dead is none %}status-unknown{% elif save.player_dead %}status-dead{% else %}status-alive{% endif %}" title="{% if save.player_dead is none %}Unknown{% elif save.player_dead %}Dead{% else %}Alive{% endif %}"></div>
+<span class="arrow">▾</span>
+</div>
+<div class="card-body">
+<div class="detail-grid">
+<div class="detail-item"><strong>Status</strong> {% if save.player_dead is none %}Unknown{% elif save.player_dead %}💀 Dead{% else %}🟢 Alive{% endif %}</div>
+{% if save.player %}<div class="detail-item"><strong>Player</strong> {{save.player}}</div>{% endif %}
+{% if save.player_x is not none %}<div class="detail-item"><strong>Position</strong> ({{save.player_x}}, {{save.player_y}})</div>{% endif %}
+{% if save.player_world_version %}<div class="detail-item"><strong>World Version</strong> {{save.player_world_version}}</div>{% endif %}
+<div class="detail-item"><strong>Modified</strong> {{save.modified}}</div>
+{% if save.mod_count %}<div class="detail-item"><strong>Mods</strong> {{save.mod_count}}</div>{% endif %}
+{% if save.players %}<div class="detail-item"><strong>Players</strong> {{save.players}}</div>{% endif %}
+</div>
+<div class="actions">
+<button class="btn btn-accent" onclick='event.stopPropagation();backup({{save.game_mode|tojson}},{{save.full_name|tojson}},this)'>💾 Backup</button>
+<button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick='event.stopPropagation();toggleWatch({{save.game_mode|tojson}},{{save.full_name|tojson}},this)'>{{'⏸ Unwatch' if save.watched else '👁 Watch'}}</button>
+<button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick='event.stopPropagation();renameSave({{save.game_mode|tojson}},{{save.full_name|tojson}},this)'>✏️ Rename</button>
+</div>
+</div>
+</div>
+{% endfor %}
+</div>
+
+<h2 style="margin-top:2rem">📋 Backups ({{all_backups|length}})</h2>
+{% if not all_backups %}<div class="empty">No backups yet.</div>{% endif %}
+{% set ns = namespace(current='', open=false) %}
+{% for b in all_backups[:50] %}
+{% set key = b.game_mode + '/' + b.save_name %}
+{% if key != ns.current %}
+{% if ns.open %}</div>{% endif %}
+{% set ns.current = key %}
+{% set ns.open = true %}
+<h3>{{b.game_mode}} / {{b.save_name[:28]}}</h3>
+<div class="grid">
+{% endif %}
+<div class="card">
+<div class="card-header" onclick="this.parentElement.classList.toggle('open')">
+{% if b.has_thumbnail %}<img src="/thumb-backup/{{b.game_mode}}/{{b.real_save_name}}/{{b.timestamp}}" class="thumb" loading="lazy">{% else %}<div class="thumb"></div>{% endif %}
+<div class="info">
+<div class="name" title="{{b.formatted}}">{{b.formatted}}</div>
+<div class="sub">{{b.age}}{% if b.auto %} · 🤖 auto{% else %} · ✋ manuel{% endif %}</div>
+</div>
+<div class="status-dot {% if b.player_dead is none %}status-unknown{% elif b.player_dead %}status-dead{% else %}status-alive{% endif %}"></div>
+<span class="arrow">▾</span>
+</div>
+<div class="card-body">
+<div class="detail-grid">
+<div class="detail-item"><strong>Status</strong> {% if b.player_dead is none %}Unknown{% elif b.player_dead %}💀 Dead{% else %}🟢 Alive{% endif %}</div>
+{% if b.player %}<div class="detail-item"><strong>Player</strong> {{b.player}}</div>{% endif %}
+<div class="detail-item"><strong>Timestamp</strong> {{b.formatted}}</div>
+<div class="detail-item"><strong>Age</strong> {{b.age}}</div>
+<div class="detail-item"><strong>Type</strong> {% if b.auto %}🤖 Automatic{% else %}✋ Manual{% endif %}</div>
+<div class="detail-item"><strong>Save</strong> {{b.game_mode}} / {{b.save_name[:30]}}</div>
+</div>
+{% if b.note %}<div style="background:rgba(233,69,96,.08);border-left:3px solid var(--accent);padding:.5rem .8rem;margin-bottom:.6rem;border-radius:4px;font-size:.78rem;color:var(--text);max-height:80px;overflow-y:auto;white-space:pre-wrap;word-break:break-word">{{b.note}}</div>{% endif %}
+<div class="actions">
+<button class="btn btn-green" onclick='event.stopPropagation();restore({{b.game_mode|tojson}},{{b.real_save_name|tojson}},{{b.timestamp|tojson}},this)'>↩ Restore</button>
+<button class="btn btn-red btn-sm" onclick='event.stopPropagation();deleteBackup({{b.game_mode|tojson}},{{b.real_save_name|tojson}},{{b.timestamp|tojson}},this)'>🗑 Delete</button>
+<button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick='event.stopPropagation();annotate({{b.game_mode|tojson}},{{b.real_save_name|tojson}},{{b.timestamp|tojson}},this)'>📝 Note</button>
+</div>
+</div>
+</div>
+{% endfor %}
+{% if ns.open %}</div>{% endif %}
+<div id="toast" class="toast" style="display:none"></div>
+<div id="settings-overlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);z-index:100;justify-content:center;align-items:center" onclick="if(event.target===this)toggleSettings()">
+<div style="background:var(--surface);padding:2rem;border-radius:var(--radius);max-width:450px;width:90%;border:1px solid var(--accent)">
+<h3 style="margin-bottom:1rem">⚙ Settings</h3>
+<div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted)">Backup directory <span class="help" title="Where backups are stored. Default: ~/.pz-save-manager/backups">?</span></label>
+<input id="cfg-backups-dir" style="width:100%;padding:.5rem;margin-top:.3rem;background:var(--bg);border:1px solid var(--accent2);color:var(--text);border-radius:6px" placeholder="Default: ~/.pz-save-manager/backups"></div>
+<div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted)">Min interval between backups (minutes) <span class="help" title="After an auto-backup, the watcher waits at least this long before making another one. Prevents backup spam during intense gameplay.">?</span></label>
+<input id="cfg-cooldown" type="number" step="1" min="0" max="1440" style="width:100%;padding:.5rem;margin-top:.3rem;background:var(--bg);border:1px solid var(--accent2);color:var(--text);border-radius:6px"></div>
+<div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted)">Max auto-backups per save <span class="help" title="Maximum number of automatic backups kept per save. Oldest auto-backups are deleted when this limit is reached. Manual backups are never pruned.">?</span></label>
+<input id="cfg-max-auto" type="number" step="1" min="1" max="999" style="width:100%;padding:.5rem;margin-top:.3rem;background:var(--bg);border:1px solid var(--accent2);color:var(--text);border-radius:6px"></div>
+<div style="display:flex;gap:.5rem;justify-content:flex-end">
+<button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick="toggleSettings()">Cancel</button>
+<button class="btn btn-sm btn-green" onclick="saveSettings()">Save</button>
+</div>
+</div>
+</div>
+<script>
+function toast(m,c){var t=document.getElementById('toast');t.textContent=m;t.style.background=c||'var(--green)';t.style.display='block';setTimeout(function(){t.style.display='none'},2500)}
+function api(m,u,b){return fetch(u,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined})}
+function doAction(b,url,body,okMsg){
+  if(b)b.disabled=true;
+  return api('POST',url,body).then(r=>r.json()).then(d=>{
+    if(d.ok){toast(okMsg||d.message||'OK');setTimeout(function(){location.reload()},600)}
+    else{toast(d.error||d.message||'Error','var(--red)');if(b)b.disabled=false}
+  }).catch(function(){toast('Network error','var(--red)');if(b)b.disabled=false})
+}
+function backup(m,n,b){doAction(b,'/api/backup',{game_mode:m,save_name:n},'Backup created!')}
+function restore(m,n,t,b){if(!confirm('Restore '+m+'/'+n+' from '+t+'?'))return;doAction(b,'/api/restore',{game_mode:m,save_name:n,timestamp:t},'Restored!')}
+function deleteBackup(m,n,t,b){if(!confirm('Delete backup '+t+'?'))return;doAction(b,'/api/backup/delete',{game_mode:m,save_name:n,timestamp:t},'Deleted!')}
+function toggleWatcher(){doAction(null,'/api/watcher/toggle',null)}
+function renameSave(m,n,b){var name=prompt('New name for '+n+':');if(!name||name.trim()===''||name.trim()===n)return;doAction(b,'/api/save/rename',{game_mode:m,old_name:n,new_name:name.trim()},'Renamed to '+name.trim()+'!')}
+function annotate(m,n,t,b){var note=prompt('Note for '+t+' (empty to remove):');if(note===null)return;doAction(b,'/api/backup/annotate',{game_mode:m,save_name:n,timestamp:t,note:note},note?'Note saved':'Note removed')}
+function toggleWatch(m,n,b){doAction(b,'/api/watcher/save',{game_mode:m,save_name:n})}
+function toggleSettings(){var o=document.getElementById('settings-overlay');if(o.style.display==='flex'){o.style.display='none'}else{o.style.display='flex';api('GET','/api/config').then(r=>r.json()).then(d=>{document.getElementById('cfg-backups-dir').value=d.backups_dir||'';document.getElementById("cfg-cooldown").value=d.backup_cooldown_minutes;document.getElementById("cfg-max-auto").value=d.max_auto_backups})}}
+function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,backup_cooldown_minutes:document.getElementById("cfg-cooldown").value,max_auto_backups:document.getElementById("cfg-max-auto").value};doAction(null,'/api/config',data,'Settings saved!')}
+function shutdown(){if(!confirm('Close PZ Save Manager?'))return;api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style="text-align:center;padding:4rem;color:#888"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'}).catch(function(){toast('Network error','var(--red)')})}
+</script>
+</body>
+</html>"""
+
+
+
+
+def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
+    path = save.path
+    modified = datetime.fromtimestamp(get_save_modified_time(save)).strftime("%Y-%m-%d %H:%M")
+    backups = list_backups(save.game_mode, save.name)
+    extra = extract_all(path)
+    info = {
+        "game_mode": save.game_mode, "name": save.name, "full_name": save.name,
+        "modified": modified,
+        "has_thumbnail": extra.get("has_thumbnail", False),
+        "backups": [{"game_mode": b.game_mode, "save_name": b.save_name,
+            "timestamp": b.timestamp, "auto": b.auto, "age": b.age, "formatted": b.formatted,
+        } for b in backups[:5]],
+        "watched": save.display_name in manager.watched_saves(),
+    }
+    for k in ("players", "map_pos", "mod_count",
+              "player", "player_dead", "player_x", "player_y", "player_world_version"):
+        if k in extra:
+            info[k] = extra[k]
+    return info
+
+
+@app.route("/")
+def index():
+    try:
+        manager = get_manager()
+        saves = list_saves()
+        # Per-save try/except: a single corrupt save shouldn't blank the page.
+        save_infos = []
+        for s in saves:
+            try:
+                save_infos.append(_save_info(s, manager))
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning("could not read save %s", s.display_name, exc_info=True)
+        all_backups = list_backups()
+        all_b = []
+        for b in all_backups:
+            # Only player_dead is used in the card; reading just players.db is
+            # O(1) versus extract_all which reads every metadata file. Backups
+            # also have b.size_mb / b.file_count properties that rglob — skip
+            # those in the list view, surface them lazily if/when needed.
+            pi = player_info(b.path) or {}
+            display_name = b.save_name
+            all_b.append({
+                "game_mode": b.game_mode, "save_name": display_name, "real_save_name": b.save_name,
+                "timestamp": b.timestamp, "auto": b.auto, "age": b.age, "formatted": b.formatted,
+                "has_thumbnail": (b.path / "thumb.png").is_file(),
+                "player": pi.get("name"),
+                "player_dead": pi.get("is_dead"),
+                "note": get_backup_note(b.path),
+            })
+        return render_template_string(PAGE, saves=save_infos, all_backups=all_b, watcher_running=manager.running)
+    except Exception:
+        import traceback
+        tb = traceback.format_exc()
+        import logging
+        logging.getLogger(__name__).exception("index render failed")
+        return (
+            "<!doctype html><meta charset='utf-8'>"
+            "<style>body{font-family:monospace;background:#111;color:#eee;padding:2rem}"
+            "pre{white-space:pre-wrap;background:#222;padding:1rem;border-radius:6px}"
+            "a{color:#e94560}</style>"
+            "<h2>PZ Save Manager — internal error</h2>"
+            f"<p>The page failed to render. <a href='/health'>Open /health</a> for diagnostics.</p>"
+            f"<pre>{escape(tb)}</pre>",
+            500,
+        )
+
+
+@app.route("/health")
+def health():
+    """Plain-text diagnostic page — shows resolved paths and what was discovered.
+
+    Useful when a user reports a blank page: navigating to /health bypasses
+    most of the rendering code and surfaces the underlying environment.
+    """
+    import json
+    import platform as _platform
+    import sys
+    from . import __version__
+
+    saves_root = get_saves_root()
+    backups_root = get_backups_root()
+    info: dict = {
+        "version": __version__,
+        "python": sys.version,
+        "executable": sys.executable,
+        "platform": _platform.platform(),
+        "frozen": getattr(sys, "frozen", False),
+        "saves_root": str(saves_root),
+        "saves_root_exists": saves_root.is_dir(),
+        "backups_root": str(backups_root),
+        "backups_root_exists": backups_root.is_dir(),
+        "errors": [],
+    }
+    try:
+        saves = list_saves()
+        info["save_count"] = len(saves)
+        info["saves"] = [{"game_mode": s.game_mode, "name": s.name, "path": str(s.path)} for s in saves]
+    except Exception as e:
+        info["errors"].append(f"list_saves: {e!r}")
+    try:
+        info["backup_count"] = len(list_backups())
+    except Exception as e:
+        info["errors"].append(f"list_backups: {e!r}")
+    if saves_root.is_dir():
+        try:
+            info["saves_root_children"] = sorted(p.name for p in saves_root.iterdir())
+        except Exception as e:
+            info["errors"].append(f"iterdir saves_root: {e!r}")
+    else:
+        zomboid = saves_root.parent
+        info["zomboid_dir_exists"] = zomboid.is_dir()
+        if zomboid.is_dir():
+            try:
+                info["zomboid_dir_children"] = sorted(p.name for p in zomboid.iterdir())
+            except Exception as e:
+                info["errors"].append(f"iterdir zomboid: {e!r}")
+
+    return (
+        "<!doctype html><meta charset='utf-8'>"
+        "<style>body{font-family:monospace;background:#111;color:#eee;padding:2rem}"
+        "pre{white-space:pre-wrap;background:#222;padding:1rem;border-radius:6px}</style>"
+        "<h2>PZ Save Manager — /health</h2>"
+        f"<pre>{escape(json.dumps(info, indent=2, default=str))}</pre>"
+    )
+
+
+def _need(data: dict | None, *keys: str):
+    """Return (data, None) if all keys present, else (None, error_response)."""
+    if not isinstance(data, dict) or not all(k in data and data[k] for k in keys):
+        return None, (jsonify({"ok": False, "error": f"Missing fields: {', '.join(keys)}"}), 400)
+    return data, None
+
+
+@app.route("/api/backup", methods=["POST"])
+def api_backup():
+    data, err = _need(request.get_json(silent=True), "game_mode", "save_name")
+    if err:
+        return err
+    try:
+        b = create_backup(data["game_mode"], data["save_name"])
+        return jsonify({"ok": True, "timestamp": b.timestamp})
+    except (SaveNotFound, BackupError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/restore", methods=["POST"])
+def api_restore():
+    data, err = _need(request.get_json(silent=True), "game_mode", "save_name", "timestamp")
+    if err:
+        return err
+    from contextlib import nullcontext
+    from .saves import get_save
+    manager = get_manager()
+    # If the target save is currently being watched, suppress watcher events
+    # while restore writes files in — otherwise the watcher would create an
+    # immediate auto-backup of the just-restored content.
+    try:
+        live_save = get_save(data["game_mode"], data["save_name"])
+        pause_ctx = manager.pause_for(live_save)
+    except SaveNotFound:
+        pause_ctx = nullcontext()
+    with pause_ctx:
+        try:
+            restore_backup(data["game_mode"], data["save_name"], data["timestamp"])
+            return jsonify({"ok": True})
+        except (BackupNotFound, BackupError) as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/backup/delete", methods=["POST"])
+def api_delete_backup():
+    data, err = _need(request.get_json(silent=True), "game_mode", "save_name", "timestamp")
+    if err:
+        return err
+    try:
+        delete_backup(data["game_mode"], data["save_name"], data["timestamp"])
+        return jsonify({"ok": True, "message": "Backup deleted"})
+    except (BackupNotFound, BackupError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/save/rename", methods=["POST"])
+def api_rename_save():
+    data, err = _need(request.get_json(silent=True), "game_mode", "old_name", "new_name")
+    if err:
+        return err
+    from .saves import SaveManagerError, rename_save
+    from .backup import preflight_rename, rename_backups_for_save
+    manager = get_manager()
+    try:
+        preflight_rename(data["game_mode"], data["old_name"], data["new_name"])
+        # Resolve the save before renaming so we can pause the watcher
+        from .saves import get_save
+        live_save = get_save(data["game_mode"], data["old_name"])
+        with manager.pause_for(live_save):
+            new_save = rename_save(data["game_mode"], data["old_name"], data["new_name"])
+            # Move backups alongside
+            n = rename_backups_for_save(data["game_mode"], data["old_name"], data["new_name"])
+            # Update watcher if the old name was watched
+            if live_save.display_name in manager.watched_saves():
+                manager.unwatch(live_save)
+                manager.watch(new_save)
+    except (SaveManagerError, BackupError, SaveNotFound) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    return jsonify({"ok": True, "message": f"Save renamed to {data['new_name']}", "backups_moved": n})
+
+
+@app.route("/api/backup/annotate", methods=["POST"])
+def api_annotate_backup():
+    data, err = _need(request.get_json(silent=True), "game_mode", "save_name", "timestamp")
+    if err:
+        return err
+    note = (data or {}).get("note", "")
+    try:
+        backup = get_backup(data["game_mode"], data["save_name"], data["timestamp"])
+        set_backup_note(backup.path, note)
+    except (BackupNotFound, BackupError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    return jsonify({"ok": True, "message": "Note saved" if note else "Note removed"})
+
+
+@app.route("/api/watcher/toggle", methods=["POST"])
+def api_watcher_toggle():
+    manager = get_manager()
+    if manager.running:
+        manager.stop()
+        return jsonify({"ok": True, "message": "Watcher stopped"})
+    saves = list_saves()
+    cooldown = config_get_all().get("backup_cooldown_minutes", 5) * 60
+    for s in saves:
+        manager.watch(s, backup_cooldown_seconds=cooldown)
+    manager.start()
+    return jsonify({"ok": True, "message": f"Watcher started ({len(saves)} saves)"})
+
+
+@app.route("/api/watcher/save", methods=["POST"])
+def api_watcher_save():
+    data, err = _need(request.get_json(silent=True), "game_mode", "save_name")
+    if err:
+        return err
+    from .saves import get_save
+    try:
+        save = get_save(data["game_mode"], data["save_name"])
+    except SaveNotFound:
+        return jsonify({"ok": False, "error": "Save not found"}), 404
+    manager = get_manager()
+    if save.display_name in manager.watched_saves():
+        manager.unwatch(save)
+        return jsonify({"ok": True, "message": f"Unwatched {save.name}"})
+    manager.watch(save)
+    if not manager.running:
+        manager.start()
+    return jsonify({"ok": True, "message": f"Watching {save.name}"})
+
+
+@app.route("/api/config", methods=["GET", "POST"])
+def api_config():
+    """Get or update configuration."""
+    if request.method == "GET":
+        return jsonify(config_get_all())
+    data = request.get_json(silent=True) or {}
+    try:
+        for key, value in data.items():
+            # Allow clearing string-typed settings (e.g. resetting backups_dir to default)
+            if key == "backups_dir":
+                config_set(key, value if value else None)
+                continue
+            if value is None or value == "":
+                continue
+            if key == "debounce_seconds":
+                value = float(value)
+            elif key == "backup_cooldown_minutes":
+                value = int(value)
+            elif key == "max_auto_backups":
+                value = int(value)
+            elif key == "port":
+                value = int(value)
+            elif key == "auto_start_watcher":
+                if not isinstance(value, bool):
+                    value = str(value).lower() in ("true", "1", "yes")
+            config_set(key, value)
+    except (ValueError, TypeError) as e:
+        return jsonify({"ok": False, "error": f"Invalid value: {e}"}), 400
+    return jsonify({"ok": True, "message": "Settings saved", "config": config_get_all()})
+
+
+@app.route("/thumb-backup/<game_mode>/<save_name>/<timestamp>")
+def serve_backup_thumbnail(game_mode: str, save_name: str, timestamp: str):
+    from .backup import get_backup
+    try:
+        backup = get_backup(game_mode, save_name, timestamp)
+        thumb = backup.path / "thumb.png"
+        if thumb.is_file():
+            return send_file(thumb, mimetype="image/png")
+    except Exception:
+        pass
+    return "", 404
+
+
+@app.route("/thumb/<game_mode>/<save_name>")
+def serve_thumbnail(game_mode: str, save_name: str):
+    from .saves import get_save
+    try:
+        save = get_save(game_mode, save_name)
+        thumb = save.path / "thumb.png"
+        if thumb.is_file():
+            return send_file(thumb, mimetype="image/png")
+    except Exception:
+        pass
+    return "", 404
+
+
+@app.route("/api/shutdown", methods=["POST"])
+def api_shutdown():
+    """Gracefully stop the server."""
+    manager = get_manager()
+    if manager.running:
+        manager.stop()
+
+    # Capture the Werkzeug shutdown function while we're still inside the
+    # Flask request context.  The Timer callback runs in a different thread
+    # where flask.request (a thread-local proxy) is empty.
+    shutdown_func = request.environ.get("werkzeug.server.shutdown")
+
+    def _shutdown() -> None:
+        import os
+        import sys
+        if shutdown_func is not None:
+            try:
+                shutdown_func()
+                return
+            except Exception:
+                pass
+        # sys.exit only kills the request thread, not the main process.
+        # Try it anyway (works in some WSGI servers), but fall back to
+        # os._exit as last resort. The 3-second delay ensures the HTTP
+        # response has time to flush before the process dies.
+        try:
+            sys.exit(0)
+        except SystemExit:
+            pass
+        os._exit(0)
+
+    from threading import Timer
+    Timer(3.0, _shutdown).start()
+    return jsonify({"ok": True, "message": "Shutting down..."})
+
+
+def run_gui(host: str = "127.0.0.1", port: int = 8080) -> None:
+    import webbrowser
+    url = f"http://{host}:{port}"
+    saves_root = get_saves_root()
+    try:
+        save_count = len(list_saves())
+    except Exception as e:
+        save_count = f"error: {e!r}"
+    print(f"\n  PZ Save Manager - {url}")
+    print(f"  Saves dir : {saves_root} (exists={saves_root.is_dir()})")
+    print(f"  Backups   : {get_backups_root()}")
+    print(f"  Found     : {save_count} save(s)")
+    print(f"  Diagnostics: {url}/health\n")
+    webbrowser.open(url)
+    app.run(host=host, port=port, debug=False)
+
+
+# File: /tmp/pz-review/src/pz_save_manager/installer.py
+"""One-command installer — creates launchers, desktop shortcuts, auto-start."""
+
+from __future__ import annotations
+
+import os
+import platform
+import shutil
+import sys
+from pathlib import Path
+
+
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+ICON = "🧟"
+
+
+def install_linux() -> None:
+    """Create .desktop entry for Linux app menus."""
+    desktop_dir = Path.home() / ".local" / "share" / "applications"
+    desktop_dir.mkdir(parents=True, exist_ok=True)
+
+    desktop_file = desktop_dir / "pz-save-manager.desktop"
+    launcher = PROJECT_DIR / "launcher.sh"
+
+    desktop_file.write_text(f"""[Desktop Entry]
+Name=PZ Save Manager
+Comment=Backup manager for Project Zomboid
+Exec={launcher}
+Icon=utilities-terminal
+Terminal=true
+Type=Application
+Categories=Game;Utility;
+""")
+    os.chmod(desktop_file, 0o755)
+    print(f"  ✓ Desktop entry: {desktop_file}")
+
+
+def install_windows() -> None:
+    """Create Start Menu shortcut for Windows."""
+    import pythoncom
+    from win32com.client import Dispatch
+
+    startup = Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
+    shortcut_path = startup / "PZ Save Manager.lnk"
+
+    shell = Dispatch("WScript.Shell")
+    shortcut = shell.CreateShortcut(str(shortcut_path))
+    shortcut.TargetPath = str(PROJECT_DIR / "launcher.bat")
+    shortcut.WorkingDirectory = str(PROJECT_DIR)
+    shortcut.IconLocation = "shell32.dll,13"
+    shortcut.Save()
+    print(f"  ✓ Start Menu shortcut: {shortcut_path}")
+
+
+def install() -> None:
+    """Create launchers and desktop shortcuts."""
+    print(f"\n  {ICON} Installing PZ Save Manager...\n")
+
+    system = platform.system()
+    if system == "Linux":
+        install_linux()
+    elif system == "Windows":
+        install_windows()
+    elif system == "Darwin":
+        print("  macOS: double-click launcher.sh")
+    else:
+        print(f"  Unknown OS: {system} — use launcher.sh directly")
+
+    print(f"\n  Done! Launch with: {PROJECT_DIR}/launcher.{'bat' if system == 'Windows' else 'sh'}\n")
+
+
+if __name__ == "__main__":
+    install()
+
+
+# File: /tmp/pz-review/src/pz_save_manager/platforms.py
+"""Cross-platform path helpers for Project Zomboid saves and backups."""
+
+from __future__ import annotations
+
+import os
+import platform
+from pathlib import Path
+
+
+APP_DIR_NAME = ".pz-save-manager"
+ZOMBOID_DIR_NAME = "Zomboid"
+SAVES_DIR_NAME = "Saves"
+BACKUPS_DIR_NAME = "backups"
+
+
+def get_home_dir() -> Path:
+    """Return the user home directory with a Windows-friendly fallback."""
+    if platform.system() == "Windows":
+        user_profile = os.environ.get("USERPROFILE")
+        if user_profile:
+            return Path(user_profile).expanduser()
+    return Path.home()
+
+
+def get_zomboid_dir(home: Path | str | None = None) -> Path:
+    """Return the root Project Zomboid user data directory."""
+    base_home = Path(home).expanduser() if home is not None else get_home_dir()
+    return base_home / ZOMBOID_DIR_NAME
+
+
+def get_saves_root(home: Path | str | None = None) -> Path:
+    """Return the directory containing Project Zomboid save modes."""
+    return get_zomboid_dir(home) / SAVES_DIR_NAME
+
+
+def get_app_dir(home: Path | str | None = None) -> Path:
+    """Return this tool per-user data directory."""
+    base_home = Path(home).expanduser() if home is not None else get_home_dir()
+    return base_home / APP_DIR_NAME
+
+
+def get_backups_root(home: Path | str | None = None) -> Path:
+    """Return the root directory containing all backups.
+
+    Respects the configured custom backup directory if set.
+    """
+    from .config import get_backups_dir
+    custom = get_backups_dir()
+    if custom is not None:
+        return custom
+    return get_app_dir(home) / BACKUPS_DIR_NAME
+
+
+# File: /tmp/pz-review/src/pz_save_manager/save_info.py
+"""Safe extraction of metadata from Project Zomboid save files.
+
+All extractors are defensive — they return None/defaults on any failure
+so the GUI never crashes on a corrupted or unexpected save format.
+"""
+
+from __future__ import annotations
+
+import re
+import sqlite3
+from pathlib import Path
+
+
+# ---- thumb.png ----
+
+def has_thumbnail(save_path: Path) -> bool:
+    return (save_path / "thumb.png").is_file()
+
+
+# ---- mods.txt ----
+
+def parse_mods(save_path: Path) -> list[str] | None:
+    """Return list of active mod IDs, or None."""
+    path = save_path / "mods.txt"
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    # Extract quoted mod names from mods {} block
+    mods = re.findall(r'"([^"]+)"', text)
+    return mods if mods else []
+
+
+# ---- map name (map_ver.bin) ----
+
+def map_name(save_path: Path) -> str | None:
+    """Extract visible map name from map_ver.bin (e.g. 'Rosewood, KY')."""
+    path = save_path / "map_ver.bin"
+    if not path.is_file():
+        return None
+    try:
+        data = path.read_bytes()
+        # The format is: 4 bytes version, 4 bytes flags, then UTF-16LE strings
+        # Look for the readable part (starts after ~8 bytes, UTF-16LE encoded)
+        # Decode from offset 8 as UTF-16LE, grab first null-terminated string
+        if len(data) > 12:
+            # Try parsing as UTF-16LE from byte 8
+            raw = data[8:]
+            try:
+                decoded = raw.decode("utf-16-le", errors="ignore")
+                # Take first line / null-terminated part
+                name = decoded.split("\x00")[0].strip()
+                if name and len(name) > 2 and len(name) < 100:
+                    return name
+            except Exception:
+                pass
+            # Fallback: extract ASCII-readable chars
+            readable = "".join(chr(b) for b in raw if 32 <= b < 127)
+            if readable and len(readable) > 2:
+                return readable[:80]
+    except Exception:
+        pass
+    return None
+
+
+# ---- player name (players.db) ----
+
+def player_info(save_path: Path) -> dict | None:
+    """Return player name, status, and position from players.db."""
+    path = save_path / "players.db"
+    if not path.is_file():
+        return None
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+            cur = conn.execute(
+                "SELECT name, isDead, x, y, z, wx, wy, worldversion FROM localPlayers LIMIT 1"
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "name": row[0],
+            "is_dead": bool(row[1]),
+            "x": round(row[2]) if row[2] else 0,
+            "y": round(row[3]) if row[3] else 0,
+            "z": round(row[4]) if row[4] else 0,
+            "wx": row[5],
+            "wy": row[6],
+            "world_version": row[7],
+        }
+    except Exception:
+        return None
+
+
+# ---- WorldDictionaryLog.lua (crafted objects) ----
+
+def crafted_objects(save_path: Path) -> int | None:
+    """Count crafted/built objects from WorldDictionaryLog.lua."""
+    path = save_path / "WorldDictionaryLog.lua"
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return len(re.findall(r"registryID\s*=", text))  # P0: fixed typo 'registeryID' → 'registryID'
+
+
+# ---- WorldDictionaryReadable.lua ----
+
+def parse_world_dictionary(save_path: Path) -> dict | None:
+    """Count total, vanilla, and modded items from WorldDictionaryReadable.lua.
+
+    Returns None if the file doesn't exist or can't be parsed.
+    """
+    path = save_path / "WorldDictionaryReadable.lua"
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    total = 0
+    vanilla = 0
+    modded = 0
+    # Simple regex: count blocks that have registryID = <number>
+    ids = set()
+    for m in re.finditer(r"registryID\s*=\s*(\d+)", text):
+        ids.add(int(m.group(1)))
+    total = len(ids)
+
+    # Count vanilla items
+    vanilla = len(re.findall(r'existsAsVanilla\s*=\s*true', text, re.IGNORECASE))
+    # Count modded items
+    modded = len(re.findall(r'isModded\s*=\s*true', text, re.IGNORECASE))
+
+    return {"total": total, "vanilla": vanilla, "modded": modded}
+
+
+# ---- vehicles.db ----
+
+def count_vehicles(save_path: Path) -> int | None:
+    """Return the number of vehicles, or None if the DB can't be read."""
+    path = save_path / "vehicles.db"
+    if not path.is_file():
+        return None
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+            cur = conn.execute("SELECT COUNT(*) FROM vehicles")
+            count = cur.fetchone()[0]
+        return count
+    except Exception:
+        return None
+
+
+# ---- players.db ----
+
+def count_players(save_path: Path) -> int | None:
+    """Return the number of players (multiplayer), or None."""
+    path = save_path / "players.db"
+    if not path.is_file() or path.stat().st_size == 0:
+        return None
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+            tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+            if "players" in tables:
+                cur = conn.execute("SELECT COUNT(*) FROM players")
+                count = cur.fetchone()[0]
+                return count
+        return None
+    except Exception:
+        return None
+
+
+# ---- InGameMap.ini ----
+
+def map_position(save_path: Path) -> dict | None:
+    """Extract map center coordinates, or None."""
+    path = save_path / "InGameMap.ini"
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    cx = re.search(r"WorldMap\.CenterX=([\d.]+)", text)
+    cy = re.search(r"WorldMap\.CenterY=([\d.]+)", text)
+    zoom = re.search(r"WorldMap\.Zoom=([\d.]+)", text)
+    if cx and cy:
+        return {
+            "x": int(float(cx.group(1))),
+            "y": int(float(cy.group(1))),
+            "zoom": float(zoom.group(1)) if zoom else 18.0,
+        }
+    return None
+
+
+# ---- Aggregate ----
+
+def extract_all(save_path: Path) -> dict:
+    """Return all safely-extractable metadata for a save directory."""
+    info: dict = {}
+    info["has_thumbnail"] = has_thumbnail(save_path)
+
+    mn = map_name(save_path)
+    if mn:
+        info["map_name"] = mn
+
+    pn = player_info(save_path)
+    if pn:
+        info["player"] = pn["name"]
+        info["player_dead"] = pn["is_dead"]
+        info["player_x"] = pn["x"]
+        info["player_y"] = pn["y"]
+        info["player_world_version"] = pn["world_version"]
+
+    mods = parse_mods(save_path)
+    if mods is not None:
+        info["mods"] = mods
+        info["mod_count"] = len(mods)
+
+    # crafted_objects and parse_world_dictionary read multi-megabyte .lua
+    # files; their output isn't displayed anywhere in the GUI. Skipped on
+    # the hot path. Call those functions directly if you need the data.
+
+    v = count_vehicles(save_path)
+    if v is not None:
+        info["vehicles"] = v
+
+    p = count_players(save_path)
+    if p is not None:
+        info["players"] = p
+
+    pos = map_position(save_path)
+    if pos:
+        info["map_x"] = pos["x"]
+        info["map_y"] = pos["y"]
+        info["map_zoom"] = pos["zoom"]
+
+    return info
+
+
+# ── World version → Build mapping ─────────────────────────────────────
+#
+# The world version is bumped by the PZ devs whenever the save-file format
+# changes.  It does NOT change on every patch, so multiple minor builds
+# share the same world version.  The breakpoints below are from community
+# knowledge and the pzdataspec project.
+
+# fmt: off
+_WORLD_VERSION_BUILD: list[tuple[range, str]] = [
+    (range(0,   160),   "Build 40 or earlier"),
+    (range(160, 196),   "Build 41"),
+    (range(196, 210),   "Build 41 (late)"),
+    (range(210, 241),   "Build 41/42 transition"),
+    (range(241, 246),   "Build 42 (early)"),
+    (range(246, 300),   "Build 42"),
+    (range(300, 9999),  "Build 42+"),
+]
+# fmt: on
+
+
+def world_version_to_build(world_version: int) -> str:
+    """Map a PZ world version number to a human-readable build string."""
+    for rng, label in _WORLD_VERSION_BUILD:
+        if world_version in rng:
+            return label
+    return f"Build ? (world v{world_version})"
+
+
+# File: /tmp/pz-review/src/pz_save_manager/saves.py
+"""Save discovery for Project Zomboid."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+from .platforms import get_saves_root
+
+
+class SaveManagerError(Exception):
+    """Base error for save manager operations."""
+
+
+class SaveNotFound(SaveManagerError):
+    """Raised when a specific save cannot be found."""
+
+
+@dataclass(frozen=True)
+class SaveGame:
+    """A discovered Project Zomboid save directory."""
+    game_mode: str
+    name: str
+    path: Path
+
+    @property
+    def display_name(self) -> str:
+        return f"{self.game_mode}/{self.name}"
+
+
+def _to_root(saves_root: Path | str | None) -> Path:
+    return Path(saves_root).expanduser() if saves_root is not None else get_saves_root()
+
+
+def get_save_modified_time(save: SaveGame) -> float:
+    """Return a representative modification time for the save (fast, no rglob).
+
+    A full rglob is O(files) — PZ saves contain thousands of map chunks, and
+    on Windows with real-time AV, walking the tree can take minutes per save.
+    Sampling the save dir + the files PZ actually writes to is O(1) and gives
+    the same answer for any normal play session.
+    """
+    latest = save.path.stat().st_mtime
+    for name in ("sandbox.lua", "players.db", "vehicles.db", "map_ver.bin", "map"):
+        try:
+            t = (save.path / name).stat().st_mtime
+            if t > latest:
+                latest = t
+        except OSError:
+            continue
+    return latest
+
+
+def list_game_modes(saves_root: Path | str | None = None) -> list[str]:
+    """List available game mode directories."""
+    root = _to_root(saves_root)
+    if not root.is_dir():
+        return []
+    return sorted(
+        (path.name for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")),
+        key=str.casefold,
+    )
+
+
+def list_saves(saves_root: Path | str | None = None) -> list[SaveGame]:
+    """Discover saves under Saves/GameMode/SaveName."""
+    root = _to_root(saves_root)
+    if not root.is_dir():
+        return []
+
+    saves: list[SaveGame] = []
+    for mode_dir in root.iterdir():
+        if not mode_dir.is_dir() or mode_dir.name.startswith("."):
+            continue
+        for save_dir in mode_dir.iterdir():
+            if save_dir.is_dir() and not save_dir.name.startswith("."):
+                if not _should_skip(save_dir.name):
+                    saves.append(SaveGame(mode_dir.name, save_dir.name, save_dir))
+
+    # Most recently modified first; tied saves fall back to alphabetical order.
+    return sorted(saves, key=lambda save: (-get_save_modified_time(save),
+                                             save.game_mode.casefold(),
+                                             save.name.casefold()))
+
+
+_MULTIPLAYER_RE = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}_')
+# Multiplayer saves created when joining a named server (e.g. "MyServer_player")
+_MP_PLAYER_SUFFIX_RE = re.compile(r'_player$', re.IGNORECASE)
+# Crash-recovery auto-saves created by PZ after a crash (ARK_..._crash_crash...)
+_CRASH_SUFFIX_RE = re.compile(r'_crash(_crash)*$', re.IGNORECASE)
+
+
+def _is_multiplayer(name: str) -> bool:
+    """Return True if the save name matches a server address (multiplayer save)."""
+    return bool(_MULTIPLAYER_RE.match(name))
+
+
+def _should_skip(name: str) -> bool:
+    """Return True for auto-generated saves that should be hidden.
+    
+    Excludes:
+    - Multiplayer saves (IP-prefixed or _player suffix)
+    - Crash-recovery auto-saves (_crash suffix)
+    """
+    return (
+        _MULTIPLAYER_RE.match(name)
+        or _MP_PLAYER_SUFFIX_RE.search(name)
+        or _CRASH_SUFFIX_RE.search(name)
+    )
+
+
+def get_save(game_mode: str, save_name: str, saves_root: Path | str | None = None) -> SaveGame:
+    """Return a specific save or raise SaveNotFound."""
+    # P0: prevent path traversal — reject '..', '/', '\\' and null bytes in components
+    for val, label in ((game_mode, "game_mode"), (save_name, "save_name")):
+        if ".." in val or "/" in val or "\\" in val or "\x00" in val:
+            raise SaveNotFound(f"Invalid {label}: {val!r}")
+    root = _to_root(saves_root)
+    path = root / game_mode / save_name
+    if not path.is_dir():
+        raise SaveNotFound(f"Save not found: {game_mode}/{save_name}")
+    return SaveGame(game_mode, save_name, path)
+
+
+_SANE_NAME_RE = re.compile(r'^[^/\x00]{1,200}$')
+
+
+def _validate_name(value: str, label: str) -> None:
+    """Reject empty, path-traversal, IP-shaped, or otherwise dangerous names."""
+    if not value or not value.strip():
+        raise SaveManagerError(f"{label} cannot be empty")
+    if ".." in value or "/" in value or "\\" in value or "\x00" in value:
+        raise SaveManagerError(f"Invalid {label}: {value!r}")
+    if _is_multiplayer(value.strip()):
+        raise SaveManagerError(f"{label} looks like a server address: {value!r}")
+    if not _SANE_NAME_RE.match(value):
+        raise SaveManagerError(f"Invalid characters in {label}: {value!r}")
+    if len(value.strip()) > 200:
+        raise SaveManagerError(f"{label} is too long (max 200 characters)")
+
+
+def rename_save(
+    game_mode: str,
+    old_name: str,
+    new_name: str,
+    *,
+    saves_root: Path | str | None = None,
+) -> SaveGame:
+    """Rename a save directory. Raises SaveManagerError on invalid names or conflicts."""
+    _validate_name(game_mode, "game_mode")
+    _validate_name(old_name, "old_name")
+    _validate_name(new_name, "new_name")
+
+    old = get_save(game_mode, old_name, saves_root=saves_root)
+    root = _to_root(saves_root)
+    new_path = root / game_mode / new_name.strip()
+    if new_path.exists():
+        raise SaveManagerError(f"Cannot rename save to {new_name!r}: Destination already exists: {new_name!r}")
+    try:
+        old.path.rename(new_path)
+    except OSError as e:
+        raise SaveManagerError(f"Cannot rename save to {new_name!r}: {e}") from e
+    return SaveGame(game_mode, new_name.strip(), new_path)
+
+
+# File: /tmp/pz-review/src/pz_save_manager/watcher.py
+"""File watcher for automatic save backups using watchdog."""
+
+from __future__ import annotations
+
+import threading
+import time
+from contextlib import contextmanager
+from pathlib import Path
+
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+
+from .backup import BackupRecord, create_backup
+from .saves import SaveGame
+
+
+class SaveWatcher(FileSystemEventHandler):
+    """Watches a save directory and creates backups after changes settle."""
+
+    def __init__(
+        self,
+        save: SaveGame,
+        debounce_seconds: float = 5.0,
+        backup_cooldown_seconds: float = 300.0,
+        on_backup: callable | None = None,
+    ) -> None:
+        self.save = save
+        self.debounce_seconds = debounce_seconds
+        self.backup_cooldown_seconds = backup_cooldown_seconds
+        self.on_backup = on_backup
+        self._last_event = 0.0
+        self._timer: threading.Timer | None = None
+        self._lock = threading.Lock()
+        self._backups: list[BackupRecord] = []
+        self._ignore_until = 0.0  # epoch seconds; events before this are dropped
+        self._last_backup_time = 0.0  # epoch seconds of last auto-backup
+        self._last_backup_mtime = 0.0  # save mtime at time of last backup
+
+    def pause(self) -> None:
+        """Suppress all events until resume() is called.
+
+        Used during operations that legitimately rewrite the save dir
+        (e.g. restore_backup), so the watcher doesn't immediately back
+        up the just-restored content. Any pending debounce timer is
+        cancelled.
+        """
+        with self._lock:
+            self._ignore_until = float("inf")
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+
+    def cancel_pending(self) -> None:
+        """Cancel any pending debounce backup."""
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+
+    def resume(self, grace_seconds: float = 1.0) -> None:
+        """Re-enable events, with a short grace window for in-flight
+        watchdog events from the paused operation to drain."""
+        with self._lock:
+            self._ignore_until = time.time() + grace_seconds
+
+    def on_modified(self, event) -> None:
+        if event.is_directory:
+            return
+        now = time.time()
+        with self._lock:
+            if now < self._ignore_until:
+                return
+            self._last_event = now
+            if self._timer is not None:
+                self._timer.cancel()
+            self._timer = threading.Timer(self.debounce_seconds, self._do_backup)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def _do_backup(self) -> None:
+        now = time.time()
+        from .saves import get_save_modified_time
+        backup: BackupRecord | None = None
+        callback = None
+        try:
+            with self._lock:
+                self._timer = None
+                # Enforce cooldown: skip if the last auto-backup was too recent.
+                if now - self._last_backup_time < self.backup_cooldown_seconds:
+                    return
+                # Skip if the save hasn't actually changed since the last backup.
+                # On Windows, watchdog can fire on spurious events (AV, indexing,
+                # attribute changes). We guard against this by comparing mtims.
+                try:
+                    current_mtime = get_save_modified_time(self.save)
+                except OSError:
+                    return
+                if current_mtime <= self._last_backup_mtime:
+                    return
+                backup = create_backup(self.save.game_mode, self.save.name, auto=True)
+                self._backups.append(backup)
+                self._last_backup_time = now
+                self._last_backup_mtime = current_mtime
+                callback = self.on_backup
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error("Auto-backup failed for %s/%s: %s", self.save.game_mode, self.save.name, e, exc_info=True)
+            return
+        if backup is not None and callback:
+            callback(backup)
+
+
+class WatcherManager:
+    """Manages multiple SaveWatcher instances."""
+
+    def __init__(self) -> None:
+        self._observer = Observer()
+        self._watchers: dict[str, SaveWatcher] = {}
+        self._watches: dict[str, object] = {}  # watchdog handles
+        self._running = False
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    def start(self) -> None:
+        if not self._running:
+            if not self._observer.is_alive():
+                self._observer = Observer()
+                # Re-schedule all watched saves
+                for key, watcher in list(self._watchers.items()):
+                    save = watcher.save
+                    handle = self._observer.schedule(watcher, str(save.path), recursive=True)
+                    self._watches[key] = handle
+            self._observer.start()
+            self._running = True
+
+    def stop(self) -> None:
+        for watcher in list(self._watchers.values()):
+            watcher.cancel_pending()
+        if self._running:
+            self._observer.stop()
+            self._observer.join(timeout=5)
+            self._running = False
+
+    def watch(self, save: SaveGame, debounce_seconds: float = 5.0, backup_cooldown_seconds: float = 300.0) -> SaveWatcher:
+        key = save.display_name
+        if key in self._watchers:
+            return self._watchers[key]
+        watcher = SaveWatcher(save, debounce_seconds, backup_cooldown_seconds)
+        self._watchers[key] = watcher
+        handle = self._observer.schedule(watcher, str(save.path), recursive=True)
+        self._watches[key] = handle
+        return watcher
+
+    def unwatch(self, save: SaveGame) -> None:
+        key = save.display_name
+        if key in self._watches:
+            self._observer.unschedule(self._watches[key])
+            del self._watches[key]
+        if key in self._watchers:
+            watcher = self._watchers.pop(key)
+            watcher.cancel_pending()
+
+    def watched_saves(self) -> list[str]:
+        return sorted(self._watchers.keys())
+
+    def get_backups(self, save: SaveGame) -> list[BackupRecord]:
+        key = save.display_name
+        if key in self._watchers:
+            return list(self._watchers[key]._backups)
+        return []
+
+    @contextmanager
+    def pause_for(self, save: SaveGame):
+        """Context manager: temporarily silence the watcher for `save`.
+
+        No-op if the save isn't being watched. After the block exits,
+        the watcher resumes with a short grace window so any file
+        events still in watchdog's queue from the operation get dropped
+        instead of triggering an immediate auto-backup.
+        """
+        watcher = self._watchers.get(save.display_name)
+        if watcher is not None:
+            watcher.pause()
+        try:
+            yield
+        finally:
+            if watcher is not None:
+                watcher.resume()
+
+
+# Global instance
+_manager: WatcherManager | None = None
+
+
+def get_manager() -> WatcherManager:
+    global _manager
+    if _manager is None:
+        _manager = WatcherManager()
+    return _manager
+
+
+# File: /tmp/pz-review/tests/conftest.py
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+
+# File: /tmp/pz-review/tests/test_adversarial.py
+"""Adversarial security and robustness tests for PZ Save Manager.
+
+Each test is designed to FAIL against the current code, demonstrating a real risk.
+Updated to reflect P0 fixes: path traversal guard, symlink skipping, atomic backup,
+cleanup resilience, and logged (not silent) watcher errors.
+"""
+
+import logging
+import threading
+from datetime import datetime
+from pathlib import Path
+
+import pytest
+
+import pz_save_manager.backup as backup_mod
+from pz_save_manager.saves import SaveGame, SaveManagerError, get_save
+
+
+# ── RISK 1: Path traversal in get_save() ──────────────────────────────
+def test_get_save_rejects_path_traversal(tmp_path: Path) -> None:
+    saves = tmp_path / "saves"
+    (saves / "Sandbox").mkdir(parents=True)
+    outside = tmp_path / "secret"
+    outside.mkdir()
+
+    with pytest.raises(SaveManagerError):
+        get_save("Sandbox", "../../secret", saves_root=saves)
+
+
+# ── RISK 2: Symlink materialisation during restore ────────────────────
+def test_restore_does_not_follow_backup_symlinks(tmp_path: Path) -> None:
+    saves = tmp_path / "saves"
+    backups = tmp_path / "backups"
+    backup_dir = backups / "Sandbox" / "World" / "20260518-120000"
+    backup_dir.mkdir(parents=True)
+
+    secret = tmp_path / "secret.txt"
+    secret.write_text("do-not-copy", encoding="utf-8")
+    (backup_dir / "leak.txt").symlink_to(secret)
+
+    backup_mod.restore_backup(
+        "Sandbox", "World", "20260518-120000",
+        saves_root=saves, backups_root=backups,
+    )
+
+    # P0 fix: symlinks are now SKIPPED entirely during copytree
+    assert not (saves / "Sandbox" / "World" / "leak.txt").exists(), (
+        "Symlink was followed — external file materialised in live save!"
+    )
+
+
+# ── RISK 3: Non-atomic backup creation (TOCTOU race) ──────────────────
+def test_concurrent_backups_get_distinct_destinations(
+    tmp_path: Path,
+) -> None:
+    saves = tmp_path / "saves"
+    backups = tmp_path / "backups"
+    save_dir = saves / "Sandbox" / "World"
+    save_dir.mkdir(parents=True)
+    (save_dir / "map.bin").write_text("x", encoding="utf-8")
+
+    results: list[str] = []
+    errors: list[Exception] = []
+
+    def worker() -> None:
+        try:
+            b = backup_mod.create_backup(
+                "Sandbox", "World",
+                saves_root=saves, backups_root=backups,
+                now=datetime(2026, 5, 18, 12, 0, 0),
+            )
+            results.append(b.timestamp)
+        except Exception as exc:
+            errors.append(exc)
+
+    t1 = threading.Thread(target=worker)
+    t2 = threading.Thread(target=worker)
+    t1.start(); t2.start(); t1.join(); t2.join()
+
+    # P0 fix: _unique_destination now uses atomic mkdir — no FileExistsError
+    assert not errors, f"Concurrent backup failed with: {errors}"
+    assert sorted(results) == ["20260518-120000", "20260518-120000-01"], (
+        f"Expected two distinct timestamps, got: {results}"
+    )
+
+
+# ── RISK 4: Restore survives cleanup failure ──────────────────────────
+def test_restore_survives_cleanup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    saves = tmp_path / "saves"
+    backups = tmp_path / "backups"
+    live = saves / "Sandbox" / "World"
+    live.mkdir(parents=True)
+    (live / "sandbox.lua").write_text("live-content", encoding="utf-8")
+
+    backup = backup_mod.create_backup(
+        "Sandbox", "World",
+        saves_root=saves, backups_root=backups,
+        now=datetime(2026, 5, 18, 12, 0, 0),
+    )
+    (backup.path / "sandbox.lua").write_text("backup-content", encoding="utf-8")
+
+    def fail_rmtree(path, *args, **kwargs):
+        raise OSError("cleanup failed")
+
+    monkeypatch.setattr(backup_mod.shutil, "rmtree", fail_rmtree)
+
+    # P0 fix: cleanup failure no longer raises — restore succeeds, old save is replaced
+    backup_mod.restore_backup(
+        "Sandbox", "World", backup.timestamp,
+        saves_root=saves, backups_root=backups,
+    )
+
+    assert (live / "sandbox.lua").read_text("utf-8") == "backup-content", (
+        "Restore failed to replace live save with backup content"
+    )
+
+
+# ── RISK 5: Watcher errors are logged, not silent ─────────────────────
+def test_watcher_logs_backup_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import pz_save_manager.watcher as watcher_mod
+
+    save_dir = tmp_path / "World"
+    save_dir.mkdir()
+    (save_dir / "map.bin").write_text("x", encoding="utf-8")
+    save = SaveGame("Sandbox", "World", save_dir)
+    watcher = watcher_mod.SaveWatcher(save, debounce_seconds=0)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("backup infrastructure down")
+
+    monkeypatch.setattr(watcher_mod, "create_backup", fail)
+
+    with caplog.at_level(logging.ERROR):
+        watcher._do_backup()
+
+    # P0 fix: errors are now LOGGED instead of silently swallowed
+    assert "backup infrastructure down" in caplog.text, (
+        "Watcher failure was not logged — silent error!"
+    )
+
+
+# File: /tmp/pz-review/tests/test_backup.py
+from __future__ import annotations
+
+from datetime import datetime
+
+from pz_save_manager.backup import create_backup, delete_backup, list_backups, restore_backup, set_backup_note
+
+
+def make_save(root, mode="Sandbox", name="WorldOne"):
+    save_dir = root / mode / name
+    map_dir = save_dir / "map"
+    map_dir.mkdir(parents=True)
+    (save_dir / "sandbox.lua").write_text("SandboxVars = {}", encoding="utf-8")
+    (map_dir / "0_0.bin").write_text("chunk", encoding="utf-8")
+    return save_dir
+
+
+def test_create_backup_copies_save_and_uses_collision_suffix(tmp_path):
+    saves_root = tmp_path / "saves"
+    backups_root = tmp_path / "backups"
+    make_save(saves_root)
+    now = datetime(2026, 5, 14, 10, 30, 5)
+
+    first = create_backup("Sandbox", "WorldOne", saves_root=saves_root, backups_root=backups_root, now=now)
+    second = create_backup("Sandbox", "WorldOne", saves_root=saves_root, backups_root=backups_root, now=now)
+
+    assert first.timestamp == "20260514-103005"
+    assert second.timestamp == "20260514-103005-01"
+    assert (first.path / "sandbox.lua").read_text(encoding="utf-8") == "SandboxVars = {}"
+    assert (first.path / "map" / "0_0.bin").read_text(encoding="utf-8") == "chunk"
+
+
+def test_restore_backup_replaces_current_save(tmp_path):
+    saves_root = tmp_path / "saves"
+    backups_root = tmp_path / "backups"
+    save_dir = make_save(saves_root)
+    backup = create_backup("Sandbox", "WorldOne", saves_root=saves_root, backups_root=backups_root, now=datetime(2026, 5, 14, 10, 30, 5))
+    (save_dir / "sandbox.lua").write_text("changed", encoding="utf-8")
+    (save_dir / "new-file.txt").write_text("new", encoding="utf-8")
+
+    restored = restore_backup("Sandbox", "WorldOne", backup.timestamp, saves_root=saves_root, backups_root=backups_root)
+
+    assert restored.path == saves_root / "Sandbox" / "WorldOne"
+    assert (restored.path / "sandbox.lua").read_text(encoding="utf-8") == "SandboxVars = {}"
+    assert not (restored.path / "new-file.txt").exists()
+
+
+def test_restore_backup_ne_copie_pas_les_sidecars_internes(tmp_path):
+    """Les marqueurs .pz-* du backup ne doivent jamais contaminer la sauvegarde live."""
+    saves_root = tmp_path / "saves"
+    backups_root = tmp_path / "backups"
+    save_dir = make_save(saves_root)
+    backup = create_backup(
+        "Sandbox",
+        "WorldOne",
+        saves_root=saves_root,
+        backups_root=backups_root,
+        now=datetime(2026, 5, 14, 10, 30, 5),
+        auto=True,
+    )
+    set_backup_note(backup.path, "Jour 12")
+    (save_dir / "sandbox.lua").write_text("changed", encoding="utf-8")
+
+    restored = restore_backup("Sandbox", "WorldOne", backup.timestamp, saves_root=saves_root, backups_root=backups_root)
+
+    assert not any(path.name.startswith(".pz-") for path in restored.path.rglob("*"))
+
+    manual = create_backup(
+        "Sandbox",
+        "WorldOne",
+        saves_root=saves_root,
+        backups_root=backups_root,
+        now=datetime(2026, 5, 14, 10, 31, 5),
+    )
+    records = list_backups("Sandbox", "WorldOne", backups_root=backups_root)
+    manual_record = next(record for record in records if record.timestamp == manual.timestamp)
+
+    assert not manual_record.auto
+
+
+def test_delete_backup_removes_backup_directory(tmp_path):
+    saves_root = tmp_path / "saves"
+    backups_root = tmp_path / "backups"
+    make_save(saves_root)
+    backup = create_backup("Sandbox", "WorldOne", saves_root=saves_root, backups_root=backups_root, now=datetime(2026, 5, 14, 10, 30, 5))
+
+    deleted = delete_backup("Sandbox", "WorldOne", backup.timestamp, backups_root=backups_root)
+
+    assert deleted.timestamp == backup.timestamp
+    assert not backup.path.exists()
+    assert list_backups(backups_root=backups_root) == []
+
+
+# File: /tmp/pz-review/tests/test_cli.py
+from __future__ import annotations
+
+from click.testing import CliRunner
+
+from pz_save_manager.cli import main
+
+
+def make_save(root):
+    save_dir = root / "Sandbox" / "WorldOne"
+    save_dir.mkdir(parents=True)
+    (save_dir / "sandbox.lua").write_text("original", encoding="utf-8")
+    return save_dir
+
+
+def run_cli(runner, saves_root, backups_root, *args):
+    return runner.invoke(main, ["--saves-dir", str(saves_root), "--backups-dir", str(backups_root), *args])
+
+
+def test_cli_lists_saves_and_manages_backup_lifecycle(tmp_path):
+    saves_root = tmp_path / "saves"
+    backups_root = tmp_path / "backups"
+    save_dir = make_save(saves_root)
+    runner = CliRunner()
+
+    result = run_cli(runner, saves_root, backups_root, "list")
+    assert result.exit_code == 0, result.output
+    assert "Sandbox" in result.output
+    assert "WorldOne" in result.output
+
+    result = run_cli(runner, saves_root, backups_root, "backup", "Sandbox", "WorldOne")
+    assert result.exit_code == 0, result.output
+    timestamp = next((backups_root / "Sandbox" / "WorldOne").iterdir()).name
+
+    result = run_cli(runner, saves_root, backups_root, "list-backups")
+    assert result.exit_code == 0, result.output
+    assert timestamp in result.output
+
+    (save_dir / "sandbox.lua").write_text("changed", encoding="utf-8")
+    result = run_cli(runner, saves_root, backups_root, "restore", "Sandbox", "WorldOne", timestamp, "--yes")
+    assert result.exit_code == 0, result.output
+    assert (save_dir / "sandbox.lua").read_text(encoding="utf-8") == "original"
+
+    result = run_cli(runner, saves_root, backups_root, "delete", "Sandbox", "WorldOne", timestamp, "--yes")
+    assert result.exit_code == 0, result.output
+    assert not (backups_root / "Sandbox" / "WorldOne" / timestamp).exists()
+
+
+# File: /tmp/pz-review/tests/test_gui.py
+"""Tests for the Flask web GUI."""
+
+from pathlib import Path
+
+import pytest
+
+from pz_save_manager.gui import app
+
+
+@pytest.fixture
+def client(tmp_path: Path, monkeypatch):
+    """Flask test client with test save directories."""
+    saves = tmp_path / "Zomboid" / "Saves"
+    backups = tmp_path / ".pz-save-manager" / "backups"
+    saves.mkdir(parents=True)
+    (saves / "Apocalypse" / "test-world").mkdir(parents=True)
+    (saves / "Apocalypse" / "test-world" / "sandbox.lua").write_text("return {}")
+    (saves / "Apocalypse" / "test-world" / "map").mkdir()
+
+    # Patch where they're imported: saves.py imports from platforms
+    monkeypatch.setattr("pz_save_manager.saves.get_saves_root", lambda: saves)
+    monkeypatch.setattr("pz_save_manager.backup.get_saves_root", lambda: saves)
+    monkeypatch.setattr("pz_save_manager.backup.get_backups_root", lambda: backups)
+
+    app.config["TESTING"] = True
+    return app.test_client()
+
+
+def test_index_shows_saves(client):
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert b"test-world" in resp.data
+    assert b"Apocalypse" in resp.data
+
+
+def test_api_backup_creates_backup(client):
+    resp = client.post("/api/backup", json={"game_mode": "Apocalypse", "save_name": "test-world"})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    assert "timestamp" in data
+
+
+def test_api_backup_missing_save_returns_400(client):
+    resp = client.post("/api/backup", json={"game_mode": "Apocalypse", "save_name": "nonexistent"})
+    assert resp.status_code == 400
+    assert resp.get_json()["ok"] is False
+
+
+def test_api_restore_invalid_returns_400(client):
+    resp = client.post("/api/restore", json={"game_mode": "X", "save_name": "Y", "timestamp": "bad"})
+    assert resp.status_code == 400
+
+
+def test_api_watcher_toggle(client):
+    resp = client.post("/api/watcher/toggle")
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+    resp = client.post("/api/watcher/toggle")
+    assert resp.status_code == 200
+
+
+# File: /tmp/pz-review/tests/test_platforms.py
+from __future__ import annotations
+
+from pz_save_manager.platforms import get_backups_root, get_saves_root, get_zomboid_dir
+
+
+def test_project_zomboid_paths_use_home_directory(tmp_path):
+    assert get_zomboid_dir(tmp_path) == tmp_path / "Zomboid"
+    assert get_saves_root(tmp_path) == tmp_path / "Zomboid" / "Saves"
+    assert get_backups_root(tmp_path) == tmp_path / ".pz-save-manager" / "backups"
+
+
+# File: /tmp/pz-review/tests/test_rename.py
+"""Tests for rename and prune operations."""
+
+from __future__ import annotations
+
+import pytest
+
+from pz_save_manager.backup import (
+    BackupError,
+    BackupRecord,
+    create_backup,
+    get_backup_note,
+    preflight_rename,
+    prune_auto_backups,
+    rename_backups_for_save,
+    set_backup_note,
+)
+from pz_save_manager.saves import SaveManagerError, rename_save
+
+
+# ── Rename tests ─────────────────────────────────────────────────────
+
+def test_rename_save_moves_directory(tmp_path):
+    """Renaming a save renames its directory and returns the new SaveGame."""
+    saves = tmp_path / "saves"
+    save_dir = saves / "Sandbox" / "OldWorld"
+    save_dir.mkdir(parents=True)
+    (save_dir / "map.bin").write_text("data", encoding="utf-8")
+
+    result = rename_save("Sandbox", "OldWorld", "NewWorld", saves_root=saves)
+
+    assert result.name == "NewWorld"
+    assert not save_dir.exists()
+    assert (saves / "Sandbox" / "NewWorld").is_dir()
+    assert (saves / "Sandbox" / "NewWorld" / "map.bin").read_text() == "data"
+
+
+def test_rename_save_rejects_path_traversal(tmp_path):
+    """New name with .. or / is rejected."""
+    saves = tmp_path / "saves"
+    (saves / "Sandbox" / "World").mkdir(parents=True)
+
+    with pytest.raises(SaveManagerError):
+        rename_save("Sandbox", "World", "../escape", saves_root=saves)
+    with pytest.raises(SaveManagerError):
+        rename_save("Sandbox", "World", "sub/dir", saves_root=saves)
+
+
+def test_rename_save_rejects_empty_name(tmp_path):
+    """Empty or whitespace-only names are rejected."""
+    saves = tmp_path / "saves"
+    (saves / "Sandbox" / "World").mkdir(parents=True)
+
+    with pytest.raises(SaveManagerError):
+        rename_save("Sandbox", "World", "", saves_root=saves)
+    with pytest.raises(SaveManagerError):
+        rename_save("Sandbox", "World", "   ", saves_root=saves)
+
+
+def test_rename_save_rejects_multiplayer_name(tmp_path):
+    """IP-shaped names are rejected (they are already filtered as multiplayer)."""
+    saves = tmp_path / "saves"
+    (saves / "Sandbox" / "World").mkdir(parents=True)
+
+    with pytest.raises(SaveManagerError):
+        rename_save("Sandbox", "World", "127.0.0.1_16261", saves_root=saves)
+
+
+def test_rename_save_rejects_existing_destination(tmp_path):
+    """Cannot rename to a name that already exists with content."""
+    saves = tmp_path / "saves"
+    (saves / "Sandbox" / "World").mkdir(parents=True)
+    (saves / "Sandbox" / "Collision").mkdir(parents=True)
+    (saves / "Sandbox" / "Collision" / "map.bin").write_text("x", encoding="utf-8")
+
+    with pytest.raises(SaveManagerError, match="Cannot rename"):
+        rename_save("Sandbox", "World", "Collision", saves_root=saves)
+
+
+def test_rename_save_strips_whitespace(tmp_path):
+    """Leading/trailing whitespace is stripped from the new name."""
+    saves = tmp_path / "saves"
+    (saves / "Sandbox" / "World").mkdir(parents=True)
+
+    result = rename_save("Sandbox", "World", "  Clean  ", saves_root=saves)
+
+    assert result.name == "Clean"
+    assert (saves / "Sandbox" / "Clean").is_dir()
+
+
+# ── Backup rename tests ───────────────────────────────────────────────
+
+def test_rename_backups_moves_directory(tmp_path):
+    """Backups follow the save rename."""
+    saves = tmp_path / "saves"
+    backups = tmp_path / "backups"
+    save_dir = saves / "Apocalypse" / "Alpha"
+    save_dir.mkdir(parents=True)
+    (save_dir / "map.bin").write_text("x", encoding="utf-8")
+
+    create_backup("Apocalypse", "Alpha", saves_root=saves, backups_root=backups)
+    assert (backups / "Apocalypse" / "Alpha").is_dir()
+
+    n = rename_backups_for_save("Apocalypse", "Alpha", "Bravo", backups_root=backups)
+    assert n == 1
+    assert not (backups / "Apocalypse" / "Alpha").exists()
+    assert (backups / "Apocalypse" / "Bravo").is_dir()
+
+
+def test_rename_backups_noop_when_no_backups(tmp_path):
+    """Renaming backups for a save with no backups returns 0."""
+    backups = tmp_path / "backups"
+    n = rename_backups_for_save("Apocalypse", "Ghost", "Renamed", backups_root=backups)
+    assert n == 0
+
+
+def test_rename_backups_rejects_collision(tmp_path):
+    """Cannot rename backups if the new name already has backups."""
+    saves = tmp_path / "saves"
+    backups = tmp_path / "backups"
+    for name in ("Alpha", "Bravo"):
+        sd = saves / "Apocalypse" / name
+        sd.mkdir(parents=True)
+        (sd / "map.bin").write_text("x", encoding="utf-8")
+        create_backup("Apocalypse", name, saves_root=saves, backups_root=backups)
+
+    with pytest.raises(BackupError, match="Cannot rename"):
+        rename_backups_for_save("Apocalypse", "Alpha", "Bravo", backups_root=backups)
+
+
+def test_preflight_rename_bloque_la_collision_avant_de_renommer_la_save(tmp_path):
+    """Une collision de backups doit laisser la sauvegarde et ses backups sous leur nom original."""
+    saves = tmp_path / "saves"
+    backups = tmp_path / "backups"
+    for name in ("Alpha", "Bravo"):
+        sd = saves / "Apocalypse" / name
+        sd.mkdir(parents=True)
+        (sd / "map.bin").write_text(name, encoding="utf-8")
+        create_backup("Apocalypse", name, saves_root=saves, backups_root=backups)
+
+    with pytest.raises(BackupError, match="already has backups"):
+        preflight_rename("Apocalypse", "Alpha", "Bravo", backups_root=backups)
+        rename_save("Apocalypse", "Alpha", "Bravo", saves_root=saves)
+        rename_backups_for_save("Apocalypse", "Alpha", "Bravo", backups_root=backups)
+
+    assert (saves / "Apocalypse" / "Alpha").is_dir()
+    assert (saves / "Apocalypse" / "Alpha" / "map.bin").read_text(encoding="utf-8") == "Alpha"
+    assert (backups / "Apocalypse" / "Alpha").is_dir()
+    assert (backups / "Apocalypse" / "Bravo").is_dir()
+
+
+# ── Annotation tests ──────────────────────────────────────────────────
+
+def test_set_and_get_backup_note(tmp_path):
+    """Set a note, read it back, remove it."""
+    backup_dir = tmp_path / "backups" / "Sandbox" / "World" / "20260518-120000"
+    backup_dir.mkdir(parents=True)
+
+    assert get_backup_note(backup_dir) is None
+
+    set_backup_note(backup_dir, "Day 12, base built in Rosewood")
+    assert get_backup_note(backup_dir) == "Day 12, base built in Rosewood"
+
+    set_backup_note(backup_dir, "  Updated note  ")
+    assert get_backup_note(backup_dir) == "Updated note"
+
+    set_backup_note(backup_dir, "")
+    assert get_backup_note(backup_dir) is None
+
+
+def test_backup_record_note_property(tmp_path):
+    """BackupRecord.note lazily reads the .pz-note sidecar."""
+    backup_dir = tmp_path / "backups" / "Apocalypse" / "Alpha" / "20260518-120000"
+    backup_dir.mkdir(parents=True)
+
+    record = BackupRecord("Apocalypse", "Alpha", "20260518-120000", backup_dir)
+
+    assert record.note is None
+    set_backup_note(backup_dir, "Died to a horde")
+    assert record.note == "Died to a horde"
+
+    record.set_note("New note via method")
+    assert get_backup_note(backup_dir) == "New note via method"
+
+
+def test_backup_note_survives_rename(tmp_path):
+    """Notes are stored in the backup dir, so they survive rename operations."""
+    saves = tmp_path / "saves"
+    backups = tmp_path / "backups"
+    save_dir = saves / "Sandbox" / "Old"
+    save_dir.mkdir(parents=True)
+    (save_dir / "map.bin").write_text("x", encoding="utf-8")
+
+    b = create_backup("Sandbox", "Old", saves_root=saves, backups_root=backups)
+    set_backup_note(b.path, "Before rename")
+
+    rename_backups_for_save("Sandbox", "Old", "New", backups_root=backups)
+
+    new_backup_dir = backups / "Sandbox" / "New" / b.timestamp
+    assert get_backup_note(new_backup_dir) == "Before rename"
+
+
+# ── Prune tests ───────────────────────────────────────────────────────
+
+def test_prune_auto_backups_deletes_oldest(tmp_path):
+    """Oldest auto-backups are pruned to respect max_count."""
+    saves = tmp_path / "saves"
+    backups = tmp_path / "backups"
+    save_dir = saves / "Sandbox" / "World"
+    save_dir.mkdir(parents=True)
+    (save_dir / "map.bin").write_text("x", encoding="utf-8")
+
+    # Create 5 auto-backups at different timestamps
+    from datetime import datetime
+    timestamps = []
+    for i in range(5):
+        b = create_backup(
+            "Sandbox", "World",
+            saves_root=saves, backups_root=backups,
+            now=datetime(2026, 5, 18, 12, i, 0),
+            auto=True,
+        )
+        timestamps.append(b.timestamp)
+
+    assert len(list((backups / "Sandbox" / "World").iterdir())) == 5
+
+    # Prune to max 2
+    removed = prune_auto_backups("Sandbox", "World", 2, backups_root=backups)
+    assert removed == 3
+
+    remaining = sorted(d.name for d in (backups / "Sandbox" / "World").iterdir())
+    # The 2 newest should remain (timestamps are YYYYMMDD-HHMMSS format)
+    assert len(remaining) == 2
+    assert remaining == sorted(timestamps[-2:])
+
+
+def test_prune_auto_backups_ignores_manual(tmp_path):
+    """Manual backups (no .pz-auto) are never pruned."""
+    saves = tmp_path / "saves"
+    backups = tmp_path / "backups"
+    save_dir = saves / "Sandbox" / "World"
+    save_dir.mkdir(parents=True)
+    (save_dir / "map.bin").write_text("x", encoding="utf-8")
+
+    from datetime import datetime
+
+    # 2 manual backups
+    for i in range(2):
+        create_backup("Sandbox", "World", saves_root=saves, backups_root=backups,
+                      now=datetime(2026, 5, 18, 12, i, 0), auto=False)
+    # 3 auto-backups
+    for i in range(3):
+        create_backup("Sandbox", "World", saves_root=saves, backups_root=backups,
+                      now=datetime(2026, 5, 18, 13, i, 0), auto=True)
+
+    assert len(list((backups / "Sandbox" / "World").iterdir())) == 5
+
+    # Prune to max 1 auto — should keep 1 auto + 2 manual = 3 total
+    removed = prune_auto_backups("Sandbox", "World", 1, backups_root=backups)
+    assert removed == 2
+
+    autos = [d for d in (backups / "Sandbox" / "World").iterdir() if (d / ".pz-auto").is_file()]
+    manuals = [d for d in (backups / "Sandbox" / "World").iterdir() if not (d / ".pz-auto").is_file()]
+
+    assert len(autos) == 1  # 1 auto remaining
+    assert len(manuals) == 2  # 2 manuals untouched
+
+
+def test_prune_auto_backups_noop_when_under_limit(tmp_path):
+    """No pruning occurs when auto-backup count is within limit."""
+    backups = tmp_path / "backups"
+    (backups / "Sandbox" / "World").mkdir(parents=True)
+    removed = prune_auto_backups("Sandbox", "World", 30, backups_root=backups)
+    assert removed == 0
+
+
+def test_prune_auto_backups_zero_disables_pruning(tmp_path):
+    """max_count=0 disables pruning entirely (keeps all backups)."""
+    saves = tmp_path / "saves"
+    backups = tmp_path / "backups"
+    save_dir = saves / "Sandbox" / "World"
+    save_dir.mkdir(parents=True)
+    (save_dir / "map.bin").write_text("x", encoding="utf-8")
+
+    from datetime import datetime
+    for i in range(3):
+        create_backup("Sandbox", "World", saves_root=saves, backups_root=backups,
+                      now=datetime(2026, 5, 18, 12, i, 0), auto=True)
+
+    assert len(list((backups / "Sandbox" / "World").iterdir())) == 3
+    removed = prune_auto_backups("Sandbox", "World", 0, backups_root=backups)
+    assert removed == 0
+    assert len(list((backups / "Sandbox" / "World").iterdir())) == 3
+
+
+# File: /tmp/pz-review/tests/test_save_info.py
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+from pz_save_manager.save_info import (
+    count_players,
+    count_vehicles,
+    extract_all,
+    has_thumbnail,
+    map_name,
+    map_position,
+    parse_mods,
+    player_info,
+)
+
+
+def _create_players_db(path: Path, *, include_players_table: bool = False) -> None:
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE localPlayers (
+                name TEXT,
+                isDead INTEGER,
+                x REAL,
+                y REAL,
+                z REAL,
+                wx INTEGER,
+                wy INTEGER,
+                worldversion INTEGER
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO localPlayers
+            (name, isDead, x, y, z, wx, wy, worldversion)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("Alice", 1, 123.4, 567.8, 1.2, 10, 20, 195),
+        )
+        if include_players_table:
+            conn.execute("CREATE TABLE players (id INTEGER PRIMARY KEY, name TEXT)")
+            conn.executemany(
+                "INSERT INTO players (name) VALUES (?)",
+                [("Alice",), ("Bob",)],
+            )
+
+
+def test_has_thumbnail(tmp_path: Path) -> None:
+    assert has_thumbnail(tmp_path) is False
+
+    (tmp_path / "thumb.png").write_bytes(b"png")
+
+    assert has_thumbnail(tmp_path) is True
+
+
+def test_player_info(tmp_path: Path) -> None:
+    _create_players_db(tmp_path / "players.db")
+
+    info = player_info(tmp_path)
+
+    assert info == {
+        "name": "Alice",
+        "is_dead": True,
+        "x": 123,
+        "y": 568,
+        "z": 1,
+        "wx": 10,
+        "wy": 20,
+        "world_version": 195,
+    }
+
+
+def test_player_info_no_db(tmp_path: Path) -> None:
+    assert player_info(tmp_path) is None
+
+
+def test_player_info_empty_db(tmp_path: Path) -> None:
+    (tmp_path / "players.db").touch()
+
+    assert player_info(tmp_path) is None
+
+
+def test_player_info_corrupt_db(tmp_path: Path) -> None:
+    (tmp_path / "players.db").write_text("not sqlite", encoding="utf-8")
+
+    assert player_info(tmp_path) is None
+
+
+def test_count_vehicles(tmp_path: Path) -> None:
+    path = tmp_path / "vehicles.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE vehicles (id INTEGER PRIMARY KEY)")
+        conn.executemany("INSERT INTO vehicles DEFAULT VALUES", [(), (), ()])
+
+    assert count_vehicles(tmp_path) == 3
+
+
+def test_count_vehicles_no_db(tmp_path: Path) -> None:
+    assert count_vehicles(tmp_path) is None
+
+
+def test_parse_mods(tmp_path: Path) -> None:
+    (tmp_path / "mods.txt").write_text('mods { "Mod1"; "Mod2" }', encoding="utf-8")
+
+    assert parse_mods(tmp_path) == ["Mod1", "Mod2"]
+
+
+def test_parse_mods_no_file(tmp_path: Path) -> None:
+    assert parse_mods(tmp_path) is None
+
+
+def test_map_name(tmp_path: Path) -> None:
+    (tmp_path / "map_ver.bin").write_bytes(
+        b"\x00" * 8 + "Rosewood, KY\x00".encode("utf-16-le")
+    )
+
+    assert map_name(tmp_path) == "Rosewood, KY"
+
+
+def test_map_name_no_file(tmp_path: Path) -> None:
+    assert map_name(tmp_path) is None
+
+
+def test_map_position(tmp_path: Path) -> None:
+    (tmp_path / "InGameMap.ini").write_text(
+        "\n".join(
+            [
+                "WorldMap.CenterX=1234.5",
+                "WorldMap.CenterY=6789.1",
+                "WorldMap.Zoom=12.5",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert map_position(tmp_path) == {"x": 1234, "y": 6789, "zoom": 12.5}
+
+
+def test_map_position_no_file(tmp_path: Path) -> None:
+    assert map_position(tmp_path) is None
+
+
+def test_count_players(tmp_path: Path) -> None:
+    path = tmp_path / "players.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE players (id INTEGER PRIMARY KEY, name TEXT)")
+        conn.executemany(
+            "INSERT INTO players (name) VALUES (?)",
+            [("Alice",), ("Bob",)],
+        )
+
+    assert count_players(tmp_path) == 2
+
+
+def test_extract_all(tmp_path: Path) -> None:
+    (tmp_path / "thumb.png").write_bytes(b"png")
+    (tmp_path / "mods.txt").write_text('mods { "Mod1"; "Mod2" }', encoding="utf-8")
+    _create_players_db(tmp_path / "players.db", include_players_table=True)
+
+    assert extract_all(tmp_path) == {
+        "has_thumbnail": True,
+        "player": "Alice",
+        "player_dead": True,
+        "player_x": 123,
+        "player_y": 568,
+        "player_world_version": 195,
+        "mods": ["Mod1", "Mod2"],
+        "mod_count": 2,
+        "players": 2,
+    }
+
+
+# File: /tmp/pz-review/tests/test_saves.py
+from __future__ import annotations
+
+import pytest
+
+from pz_save_manager.saves import SaveNotFound, get_save, list_game_modes, list_saves
+
+
+def make_save(root, mode, name):
+    save_dir = root / mode / name
+    save_dir.mkdir(parents=True)
+    (save_dir / "map.bin").write_text("map", encoding="utf-8")
+    return save_dir
+
+
+def test_list_saves_discovers_mode_and_save_directories(tmp_path):
+    make_save(tmp_path, "Sandbox", "Bravo")
+    make_save(tmp_path, "Apocalypse", "Alpha")
+    (tmp_path / "Apocalypse" / ".hidden").mkdir()
+
+    saves = list_saves(tmp_path)
+
+    discovered = {(save.game_mode, save.name) for save in saves}
+    assert discovered == {("Apocalypse", "Alpha"), ("Sandbox", "Bravo")}
+    assert list_game_modes(tmp_path) == ["Apocalypse", "Sandbox"]
+
+
+def test_list_saves_returns_empty_for_missing_root(tmp_path):
+    assert list_saves(tmp_path / "missing") == []
+
+
+def test_get_save_raises_for_missing_save(tmp_path):
+    with pytest.raises(SaveNotFound):
+        get_save("Sandbox", "Missing", saves_root=tmp_path)
+
+
+def test_multiplayer_saves_are_excluded(tmp_path):
+    """IP-named and _player-suffixed saves should not appear in listings."""
+    make_save(tmp_path, "Sandbox", "My World")                 # singleplayer → included
+    make_save(tmp_path, "Sandbox", "127.0.0.1_16261")          # IP → excluded
+    make_save(tmp_path, "Apocalypse", "10.0.0.1_12345")        # IP → excluded
+    make_save(tmp_path, "Multiplayer", "Crapventure_player")   # _player suffix → excluded
+    make_save(tmp_path, "Multiplayer", "MyServer_Player")      # case insensitive → excluded
+
+    saves = list_saves(tmp_path)
+    names = {(s.game_mode, s.name) for s in saves}
+    assert names == {("Sandbox", "My World")}
+    assert len(saves) == 1
+
+
+def test_crash_saves_are_excluded(tmp_path):
+    """_crash and _crash_crash saves should be hidden."""
+    make_save(tmp_path, "Sandbox", "My World")                 # normal → included
+    make_save(tmp_path, "Sandbox", "My World_crash")            # crash → excluded
+    make_save(tmp_path, "Sandbox", "ARK_2026_crash_crash")     # double crash → excluded
+
+    saves = list_saves(tmp_path)
+    assert len(saves) == 1
+    assert saves[0].name == "My World"
+
+
+def test_get_save_rejects_single_backslash(tmp_path):
+    """Single backslash (Windows path separator) must be rejected."""
+    with pytest.raises(SaveNotFound):
+        get_save("game\\mode", "World", saves_root=tmp_path)
+    with pytest.raises(SaveNotFound):
+        get_save("Sandbox", "world\\..\\secret", saves_root=tmp_path)
+
+
+def test_get_save_rejects_null_byte(tmp_path):
+    """Null bytes must be rejected (C-level truncation risk)."""
+    with pytest.raises(SaveNotFound):
+        get_save("Sandbox", "world\x00hidden", saves_root=tmp_path)
+
+
+# File: /tmp/pz-review/tests/test_watcher.py
+"""Tests for the save file watcher."""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+from pz_save_manager.backup import BackupRecord
+from pz_save_manager.saves import SaveGame
+from pz_save_manager.watcher import SaveWatcher, WatcherManager
+
+
+class FakeEvent:
+    is_directory = False
+
+
+def test_save_watcher_debounce(tmp_path: Path):
+    save_dir = tmp_path / "Sandbox" / "test-save"
+    save_dir.mkdir(parents=True)
+    save = SaveGame("Sandbox", "test-save", save_dir)
+
+    backups = []
+    watcher = SaveWatcher(save, debounce_seconds=0.05, on_backup=lambda b: backups.append(b))
+    watcher.on_modified(FakeEvent())  # type: ignore
+    time.sleep(0.2)
+    # Debounce timer should have fired; backup may fail in test but watcher handles it silently
+    assert watcher._last_event > 0
+
+
+def test_watcher_manager_lifecycle():
+    manager = WatcherManager()
+    assert not manager.running
+    manager.start()
+    assert manager.running
+    manager.stop()
+    assert not manager.running
+
+
+def test_watcher_manager_watched_saves(tmp_path: Path):
+    save_dir = tmp_path / "Survivor" / "my-save"
+    save_dir.mkdir(parents=True)
+    save = SaveGame("Survivor", "my-save", save_dir)
+
+    manager = WatcherManager()
+    manager.watch(save)
+    assert "Survivor/my-save" in manager.watched_saves()
+    # Note: unwatch doesn't work with watchdog observer unless actually started
+    # because schedule creates an ObservedWatch wrapper. Tested via integration.
+
+
+def test_stop_annule_le_timer_en_attente(tmp_path: Path, monkeypatch):
+    """stop() doit empêcher un backup débouncé de partir après l'arrêt."""
+    save_dir = tmp_path / "Sandbox" / "stop-save"
+    save_dir.mkdir(parents=True)
+    save = SaveGame("Sandbox", "stop-save", save_dir)
+    created = []
+
+    def fake_create_backup(game_mode: str, save_name: str, *, auto: bool = False) -> BackupRecord:
+        created.append((game_mode, save_name, auto))
+        return BackupRecord(game_mode, save_name, "20260526-120000", tmp_path / "backup", auto=auto)
+
+    monkeypatch.setattr("pz_save_manager.watcher.create_backup", fake_create_backup)
+    manager = WatcherManager()
+    watcher = manager.watch(save, debounce_seconds=0.05, backup_cooldown_seconds=0.0)
+
+    watcher.on_modified(FakeEvent())  # type: ignore
+    manager.stop()
+    time.sleep(0.1)
+
+    assert created == []
+    assert manager.get_backups(save) == []
+
+
+def test_unwatch_annule_le_timer_en_attente(tmp_path: Path, monkeypatch):
+    """unwatch() doit annuler le timer existant avant d'oublier le watcher."""
+    save_dir = tmp_path / "Sandbox" / "unwatch-save"
+    save_dir.mkdir(parents=True)
+    save = SaveGame("Sandbox", "unwatch-save", save_dir)
+    created = []
+
+    def fake_create_backup(game_mode: str, save_name: str, *, auto: bool = False) -> BackupRecord:
+        created.append((game_mode, save_name, auto))
+        return BackupRecord(game_mode, save_name, "20260526-120000", tmp_path / "backup", auto=auto)
+
+    monkeypatch.setattr("pz_save_manager.watcher.create_backup", fake_create_backup)
+    manager = WatcherManager()
+    watcher = manager.watch(save, debounce_seconds=0.05, backup_cooldown_seconds=0.0)
+
+    watcher.on_modified(FakeEvent())  # type: ignore
+    manager.unwatch(save)
+    time.sleep(0.1)
+
+    assert created == []
+    assert save.display_name not in manager.watched_saves()
+
+
+def test_pause_for_suppresses_backup_during_block(tmp_path: Path):
+    """Restoring a watched save must not trigger an immediate auto-backup
+    of the just-restored content."""
+    save_dir = tmp_path / "Sandbox" / "world"
+    save_dir.mkdir(parents=True)
+    save = SaveGame("Sandbox", "world", save_dir)
+
+    backups = []
+    watcher = SaveWatcher(save, debounce_seconds=0.05, on_backup=lambda b: backups.append(b))
+
+    manager = WatcherManager()
+    manager._watchers[save.display_name] = watcher
+
+    class FakeEvent:
+        is_directory = False
+        src_path = str(save_dir / "sandbox.lua")
+
+    # Sanity: an event while NOT paused arms the debounce timer.
+    watcher.on_modified(FakeEvent())
+    assert watcher._timer is not None, "timer should be armed by a normal event"
+
+    # Now pause and replay events — they must be dropped, timer cleared.
+    with manager.pause_for(save):
+        watcher.on_modified(FakeEvent())
+        watcher.on_modified(FakeEvent())
+        assert watcher._timer is None, "paused watcher should not arm a timer"
+
+    # Immediately after resume(), there's a 1s grace window where lingering
+    # in-flight events are still ignored. An event in that window stays
+    # dropped — this is what prevents the post-restore auto-backup.
+    watcher.on_modified(FakeEvent())
+    assert watcher._timer is None, "events during grace window must be dropped"
+
+    # After the grace window expires, normal events arm the timer again.
+    time.sleep(1.1)
+    watcher.on_modified(FakeEvent())
+    assert watcher._timer is not None, "events after grace window must re-arm timer"
+    watcher._timer.cancel()
+
+
+def test_pause_for_is_noop_on_unwatched_save(tmp_path: Path):
+    save_dir = tmp_path / "Sandbox" / "unwatched"
+    save_dir.mkdir(parents=True)
+    save = SaveGame("Sandbox", "unwatched", save_dir)
+    manager = WatcherManager()
+    # Save isn't in manager._watchers — pause_for must be a no-op, not raise.
+    with manager.pause_for(save):
+        pass
+
+
+codex
+I’m going to verify line numbers against the checked-out files where possible, then return the review in the exact JSON shape you requested.
+exec
+/bin/bash -lc "pwd && rg -n \"def api_config|def api_shutdown|def run_gui|def get_save\\(|def rename_backups_for_save|def prune_auto_backups|class WatcherManager|def watch\\(|def start\\(|debug|traceback|send_file|app = Flask\" /tmp/pz-review/src/pz_save_manager /home/chpo/pz-save-manager/src/pz_save_manager 2>/dev/null" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+/home/chpo/pz-save-manager
+/home/chpo/pz-save-manager/src/pz_save_manager/saves.py:113:def get_save(game_mode: str, save_name: str, saves_root: Path | str | None = None) -> SaveGame:
+/home/chpo/pz-save-manager/src/pz_save_manager/watcher.py:114:class WatcherManager:
+/home/chpo/pz-save-manager/src/pz_save_manager/watcher.py:127:    def start(self) -> None:
+/home/chpo/pz-save-manager/src/pz_save_manager/watcher.py:147:    def watch(self, save: SaveGame, debounce_seconds: float = 5.0, backup_cooldown_seconds: float = 300.0) -> SaveWatcher:
+/home/chpo/pz-save-manager/src/pz_save_manager/backup.py:342:def rename_backups_for_save(
+/home/chpo/pz-save-manager/src/pz_save_manager/backup.py:377:def prune_auto_backups(
+/home/chpo/pz-save-manager/src/pz_save_manager/gui.py:9:from flask import Flask, jsonify, render_template_string, request, send_file
+/home/chpo/pz-save-manager/src/pz_save_manager/gui.py:18:app = Flask(__name__)
+/home/chpo/pz-save-manager/src/pz_save_manager/gui.py:253:        import traceback
+/home/chpo/pz-save-manager/src/pz_save_manager/gui.py:254:        tb = traceback.format_exc()
+/home/chpo/pz-save-manager/src/pz_save_manager/gui.py:458:def api_config():
+/home/chpo/pz-save-manager/src/pz_save_manager/gui.py:495:            return send_file(thumb, mimetype="image/png")
+/home/chpo/pz-save-manager/src/pz_save_manager/gui.py:508:            return send_file(thumb, mimetype="image/png")
+/home/chpo/pz-save-manager/src/pz_save_manager/gui.py:515:def api_shutdown():
+/home/chpo/pz-save-manager/src/pz_save_manager/gui.py:550:def run_gui(host: str = "127.0.0.1", port: int = 8080) -> None:
+/home/chpo/pz-save-manager/src/pz_save_manager/gui.py:564:    app.run(host=host, port=port, debug=False)
+/tmp/pz-review/src/pz_save_manager/saves.py:113:def get_save(game_mode: str, save_name: str, saves_root: Path | str | None = None) -> SaveGame:
+/home/chpo/pz-save-manager/src/pz_save_manager/cli.py:141:        app.run(host=host, port=port, debug=False)
+/tmp/pz-review/src/pz_save_manager/cli.py:141:        app.run(host=host, port=port, debug=False)
+/tmp/pz-review/src/pz_save_manager/watcher.py:114:class WatcherManager:
+/tmp/pz-review/src/pz_save_manager/watcher.py:127:    def start(self) -> None:
+/tmp/pz-review/src/pz_save_manager/watcher.py:147:    def watch(self, save: SaveGame, debounce_seconds: float = 5.0, backup_cooldown_seconds: float = 300.0) -> SaveWatcher:
+/tmp/pz-review/src/pz_save_manager/gui.py:9:from flask import Flask, jsonify, render_template_string, request, send_file
+/tmp/pz-review/src/pz_save_manager/gui.py:18:app = Flask(__name__)
+/tmp/pz-review/src/pz_save_manager/gui.py:253:        import traceback
+/tmp/pz-review/src/pz_save_manager/gui.py:254:        tb = traceback.format_exc()
+/tmp/pz-review/src/pz_save_manager/gui.py:458:def api_config():
+/tmp/pz-review/src/pz_save_manager/gui.py:495:            return send_file(thumb, mimetype="image/png")
+/tmp/pz-review/src/pz_save_manager/gui.py:508:            return send_file(thumb, mimetype="image/png")
+/tmp/pz-review/src/pz_save_manager/gui.py:515:def api_shutdown():
+/tmp/pz-review/src/pz_save_manager/gui.py:550:def run_gui(host: str = "127.0.0.1", port: int = 8080) -> None:
+/tmp/pz-review/src/pz_save_manager/gui.py:564:    app.run(host=host, port=port, debug=False)
+/tmp/pz-review/src/pz_save_manager/backup.py:342:def rename_backups_for_save(
+/tmp/pz-review/src/pz_save_manager/backup.py:377:def prune_auto_backups(
+
+exec
+/bin/bash -lc "rg -n \"def create_backup|def restore_backup|def _unique_destination|def _skip_symlinks|def _validate_component|def _save_info|def index\\(\" /tmp/pz-review/src/pz_save_manager /home/chpo/pz-save-manager/src/pz_save_manager 2>/dev/null" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+/home/chpo/pz-save-manager/src/pz_save_manager/gui.py:200:def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
+/home/chpo/pz-save-manager/src/pz_save_manager/gui.py:222:def index():
+/tmp/pz-review/src/pz_save_manager/gui.py:200:def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
+/tmp/pz-review/src/pz_save_manager/gui.py:222:def index():
+/home/chpo/pz-save-manager/src/pz_save_manager/backup.py:132:def _validate_component(value: str, label: str) -> None:
+/home/chpo/pz-save-manager/src/pz_save_manager/backup.py:148:def _skip_symlinks_and_internal(d: str, names: list[str]) -> list[str]:
+/home/chpo/pz-save-manager/src/pz_save_manager/backup.py:158:def _unique_destination(base_dir: Path, timestamp: str) -> tuple[str, Path]:
+/home/chpo/pz-save-manager/src/pz_save_manager/backup.py:177:def create_backup(
+/home/chpo/pz-save-manager/src/pz_save_manager/backup.py:270:def restore_backup(
+/tmp/pz-review/src/pz_save_manager/backup.py:132:def _validate_component(value: str, label: str) -> None:
+/tmp/pz-review/src/pz_save_manager/backup.py:148:def _skip_symlinks_and_internal(d: str, names: list[str]) -> list[str]:
+/tmp/pz-review/src/pz_save_manager/backup.py:158:def _unique_destination(base_dir: Path, timestamp: str) -> tuple[str, Path]:
+/tmp/pz-review/src/pz_save_manager/backup.py:177:def create_backup(
+/tmp/pz-review/src/pz_save_manager/backup.py:270:def restore_backup(
+
+codex
+The code has a few structural issues that matter more than local bugs: the GUI boundary is doing privileged filesystem operations directly, restore/rename flows are not transactional across subsystems, and the watcher manager has shared mutable state without a lock. I’m checking the exact call sites so the findings can be grounded in lines rather than broad modules.
+exec
+/bin/bash -lc "nl -ba /tmp/pz-review/src/pz_save_manager/backup.py | sed -n '177,410p'" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+   177	def create_backup(
+   178	    game_mode: str,
+   179	    save_name: str,
+   180	    *,
+   181	    saves_root: Path | str | None = None,
+   182	    backups_root: Path | str | None = None,
+   183	    now: datetime | None = None,
+   184	    auto: bool = False,
+   185	) -> BackupRecord:
+   186	    """Create a timestamped full backup for a save directory."""
+   187	    _validate_component(game_mode, "game mode")
+   188	    _validate_component(save_name, "save name")
+   189	    if now is None:
+   190	        now = datetime.now()
+   191	    save = get_save(game_mode, save_name, saves_root=saves_root)
+   192	    backup_base = _root(backups_root, get_backups_root()) / game_mode / save_name
+   193	    backup_base.mkdir(parents=True, exist_ok=True)
+   194	    timestamp, destination = _unique_destination(backup_base, _timestamp(now))
+   195	    # P0: copy to temp inside destination, then atomically move contents
+   196	    tmp = Path(tempfile.mkdtemp(dir=destination.parent, prefix=f".tmp-{timestamp}-"))
+   197	    try:
+   198	        shutil.copytree(save.path, tmp, copy_function=shutil.copy2,
+   199	                        ignore=_skip_symlinks_and_internal, dirs_exist_ok=True)
+   200	        # Atomic: move all contents from tmp into destination
+   201	        for item in tmp.iterdir():
+   202	            shutil.move(str(item), str(destination / item.name))
+   203	    except Exception:
+   204	        shutil.rmtree(destination, ignore_errors=True)
+   205	        raise
+   206	    finally:
+   207	        shutil.rmtree(tmp, ignore_errors=True)
+   208	    # Persist auto/manual marker
+   209	    if auto:
+   210	        try:
+   211	            (destination / _AUTO_FILE).touch()
+   212	        except OSError:
+   213	            pass
+   214	    result = BackupRecord(game_mode, save_name, timestamp, destination, auto=auto)
+   215	    # Prune excess auto-backups (manual backups are never pruned)
+   216	    if auto:
+   217	        from .config import get as config_get
+   218	        max_auto = config_get("max_auto_backups")
+   219	        if isinstance(max_auto, (int, float)) and max_auto >= 0:
+   220	            prune_auto_backups(game_mode, save_name, int(max_auto), backups_root=backups_root)
+   221	    return result
+   222	
+   223	
+   224	def list_backups(
+   225	    game_mode: str | None = None,
+   226	    save_name: str | None = None,
+   227	    *,
+   228	    backups_root: Path | str | None = None,
+   229	) -> list[BackupRecord]:
+   230	    """List backups, optionally filtered by game mode and save name."""
+   231	    if save_name is not None and game_mode is None:
+   232	        raise BackupError("A game mode is required when filtering by save name")
+   233	    root = _root(backups_root, get_backups_root())
+   234	    if not root.is_dir():
+   235	        return []
+   236	    records: list[BackupRecord] = []
+   237	    mode_dirs = [root / game_mode] if game_mode else [path for path in root.iterdir() if path.is_dir()]
+   238	    for mode_dir in mode_dirs:
+   239	        if not mode_dir.is_dir():
+   240	            continue
+   241	        save_dirs = [mode_dir / save_name] if save_name else [path for path in mode_dir.iterdir() if path.is_dir()]
+   242	        for save_dir in save_dirs:
+   243	            if not save_dir.is_dir():
+   244	                continue
+   245	            for backup_dir in save_dir.iterdir():
+   246	                if backup_dir.is_dir():
+   247	                    auto = (backup_dir / _AUTO_FILE).is_file()
+   248	                    records.append(BackupRecord(mode_dir.name, save_dir.name, backup_dir.name, backup_dir, auto=auto))
+   249	    return sorted(
+   250	        records,
+   251	        key=lambda backup: (backup.game_mode.casefold(), backup.save_name.casefold(), backup.timestamp),
+   252	        reverse=True,
+   253	    )
+   254	
+   255	
+   256	def get_backup(
+   257	    game_mode: str,
+   258	    save_name: str,
+   259	    timestamp: str,
+   260	    *,
+   261	    backups_root: Path | str | None = None,
+   262	) -> BackupRecord:
+   263	    """Return a specific backup or raise BackupNotFound."""
+   264	    path = _backup_path(game_mode, save_name, timestamp, backups_root)
+   265	    if not path.is_dir():
+   266	        raise BackupNotFound(f"Backup not found: {game_mode}/{save_name}/{timestamp}")
+   267	    return BackupRecord(game_mode, save_name, timestamp, path)
+   268	
+   269	
+   270	def restore_backup(
+   271	    game_mode: str,
+   272	    save_name: str,
+   273	    timestamp: str,
+   274	    *,
+   275	    saves_root: Path | str | None = None,
+   276	    backups_root: Path | str | None = None,
+   277	) -> SaveGame:
+   278	    """Restore a backup over the live save directory."""
+   279	    backup = get_backup(game_mode, save_name, timestamp, backups_root=backups_root)
+   280	    target = _root(saves_root, get_saves_root()) / game_mode / save_name
+   281	    target.parent.mkdir(parents=True, exist_ok=True)
+   282	    temp_target = target.with_name(f".{target.name}.restore-{uuid4().hex}.tmp")
+   283	    previous_target = target.with_name(f".{target.name}.restore-old-{uuid4().hex}")
+   284	    try:
+   285	        shutil.copytree(backup.path, temp_target, copy_function=shutil.copy2,
+   286	                        ignore=_skip_symlinks_and_internal)
+   287	        if target.exists():
+   288	            target.rename(previous_target)
+   289	        temp_target.rename(target)
+   290	    except OSError as exc:
+   291	        if temp_target.exists():
+   292	            shutil.rmtree(temp_target, ignore_errors=True)
+   293	        if previous_target.exists() and not target.exists():
+   294	            previous_target.rename(target)
+   295	        raise BackupError(f"Could not restore backup: {exc}") from exc
+   296	    # P0: cleanup wrapped in try/except — failure here must not lose the restored save
+   297	    try:
+   298	        if previous_target.exists():
+   299	            shutil.rmtree(previous_target)
+   300	    except OSError as e:
+   301	        import logging
+   302	        logging.getLogger(__name__).warning("Could not remove previous save backup %s: %s", previous_target, e)
+   303	    return SaveGame(game_mode, save_name, target)
+   304	
+   305	
+   306	def delete_backup(
+   307	    game_mode: str,
+   308	    save_name: str,
+   309	    timestamp: str,
+   310	    *,
+   311	    backups_root: Path | str | None = None,
+   312	) -> BackupRecord:
+   313	    """Delete a backup directory."""
+   314	    backup = get_backup(game_mode, save_name, timestamp, backups_root=backups_root)
+   315	    try:
+   316	        shutil.rmtree(backup.path)
+   317	    except OSError as exc:
+   318	        raise BackupError(f"Could not delete backup: {exc}") from exc
+   319	    return backup
+   320	
+   321	
+   322	def preflight_rename(
+   323	    game_mode: str,
+   324	    old_save_name: str,
+   325	    new_save_name: str,
+   326	    *,
+   327	    backups_root: Path | str | None = None,
+   328	) -> None:
+   329	    """Validate backup-side rename constraints before renaming the live save."""
+   330	    _validate_component(game_mode, "game mode")
+   331	    _validate_component(old_save_name, "old save name")
+   332	    normalized_new_name = new_save_name.strip()
+   333	    _validate_component(normalized_new_name, "new save name")
+   334	
+   335	    root = _root(backups_root, get_backups_root())
+   336	    old_dir = root / game_mode / old_save_name
+   337	    new_dir = root / game_mode / normalized_new_name
+   338	    if new_dir != old_dir and new_dir.is_dir():
+   339	        raise BackupError(f"Cannot rename backups: {normalized_new_name!r} already has backups")
+   340	
+   341	
+   342	def rename_backups_for_save(
+   343	    game_mode: str,
+   344	    old_save_name: str,
+   345	    new_save_name: str,
+   346	    *,
+   347	    backups_root: Path | str | None = None,
+   348	) -> int:
+   349	    """Move all backups from old_save_name to new_save_name under game_mode.
+   350	
+   351	    Returns the number of backups moved.  If no backups exist for the old
+   352	    name this is a no-op (returns 0).  Raises BackupError if the new name
+   353	    already has backups (to avoid silently merging two histories).
+   354	    """
+   355	    _validate_component(game_mode, "game mode")
+   356	    _validate_component(old_save_name, "old save name")
+   357	    _validate_component(new_save_name, "new save name")
+   358	
+   359	    root = _root(backups_root, get_backups_root())
+   360	    old_dir = root / game_mode / old_save_name
+   361	    new_dir = root / game_mode / new_save_name
+   362	
+   363	    if not old_dir.is_dir():
+   364	        return 0
+   365	
+   366	    # Count backups before moving
+   367	    count = sum(1 for _ in old_dir.iterdir() if _.is_dir())
+   368	    try:
+   369	        old_dir.rename(new_dir)
+   370	    except OSError as e:
+   371	        raise BackupError(
+   372	            f"Cannot rename backups: {old_save_name!r} → {new_save_name!r}: {e}"
+   373	        ) from e
+   374	    return count
+   375	
+   376	
+   377	def prune_auto_backups(
+   378	    game_mode: str,
+   379	    save_name: str,
+   380	    max_count: int,
+   381	    *,
+   382	    backups_root: Path | str | None = None,
+   383	) -> int:
+   384	    """Delete the oldest auto-backups so at most `max_count` remain.
+   385	
+   386	    Manual backups (no .pz-auto marker) are never deleted.  Returns the
+   387	    number of auto-backups removed.
+   388	    """
+   389	    if max_count <= 0:
+   390	        return 0
+   391	    root = _root(backups_root, get_backups_root())
+   392	    save_dir = root / game_mode / save_name
+   393	    if not save_dir.is_dir():
+   394	        return 0
+   395	
+   396	    # Collect auto-backup directories with their timestamps
+   397	    autos: list[tuple[str, Path]] = []
+   398	    for item in save_dir.iterdir():
+   399	        if item.is_dir() and (item / _AUTO_FILE).is_file():
+   400	            autos.append((item.name, item))
+   401	
+   402	    if len(autos) <= max_count:
+   403	        return 0
+   404	
+   405	    # Sort by timestamp (oldest first) so we delete the oldest
+   406	    autos.sort(key=lambda x: x[0])
+   407	    to_delete = autos[: len(autos) - max_count]
+   408	
+   409	    removed = 0
+   410	    for _, path in to_delete:
+
+exec
+/bin/bash -lc "nl -ba /tmp/pz-review/src/pz_save_manager/watcher.py | sed -n '1,210p'" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+     1	"""File watcher for automatic save backups using watchdog."""
+     2	
+     3	from __future__ import annotations
+     4	
+     5	import threading
+     6	import time
+     7	from contextlib import contextmanager
+     8	from pathlib import Path
+     9	
+    10	from watchdog.events import FileSystemEventHandler
+    11	from watchdog.observers import Observer
+    12	
+    13	from .backup import BackupRecord, create_backup
+    14	from .saves import SaveGame
+    15	
+    16	
+    17	class SaveWatcher(FileSystemEventHandler):
+    18	    """Watches a save directory and creates backups after changes settle."""
+    19	
+    20	    def __init__(
+    21	        self,
+    22	        save: SaveGame,
+    23	        debounce_seconds: float = 5.0,
+    24	        backup_cooldown_seconds: float = 300.0,
+    25	        on_backup: callable | None = None,
+    26	    ) -> None:
+    27	        self.save = save
+    28	        self.debounce_seconds = debounce_seconds
+    29	        self.backup_cooldown_seconds = backup_cooldown_seconds
+    30	        self.on_backup = on_backup
+    31	        self._last_event = 0.0
+    32	        self._timer: threading.Timer | None = None
+    33	        self._lock = threading.Lock()
+    34	        self._backups: list[BackupRecord] = []
+    35	        self._ignore_until = 0.0  # epoch seconds; events before this are dropped
+    36	        self._last_backup_time = 0.0  # epoch seconds of last auto-backup
+    37	        self._last_backup_mtime = 0.0  # save mtime at time of last backup
+    38	
+    39	    def pause(self) -> None:
+    40	        """Suppress all events until resume() is called.
+    41	
+    42	        Used during operations that legitimately rewrite the save dir
+    43	        (e.g. restore_backup), so the watcher doesn't immediately back
+    44	        up the just-restored content. Any pending debounce timer is
+    45	        cancelled.
+    46	        """
+    47	        with self._lock:
+    48	            self._ignore_until = float("inf")
+    49	            if self._timer is not None:
+    50	                self._timer.cancel()
+    51	                self._timer = None
+    52	
+    53	    def cancel_pending(self) -> None:
+    54	        """Cancel any pending debounce backup."""
+    55	        with self._lock:
+    56	            if self._timer is not None:
+    57	                self._timer.cancel()
+    58	                self._timer = None
+    59	
+    60	    def resume(self, grace_seconds: float = 1.0) -> None:
+    61	        """Re-enable events, with a short grace window for in-flight
+    62	        watchdog events from the paused operation to drain."""
+    63	        with self._lock:
+    64	            self._ignore_until = time.time() + grace_seconds
+    65	
+    66	    def on_modified(self, event) -> None:
+    67	        if event.is_directory:
+    68	            return
+    69	        now = time.time()
+    70	        with self._lock:
+    71	            if now < self._ignore_until:
+    72	                return
+    73	            self._last_event = now
+    74	            if self._timer is not None:
+    75	                self._timer.cancel()
+    76	            self._timer = threading.Timer(self.debounce_seconds, self._do_backup)
+    77	            self._timer.daemon = True
+    78	            self._timer.start()
+    79	
+    80	    def _do_backup(self) -> None:
+    81	        now = time.time()
+    82	        from .saves import get_save_modified_time
+    83	        backup: BackupRecord | None = None
+    84	        callback = None
+    85	        try:
+    86	            with self._lock:
+    87	                self._timer = None
+    88	                # Enforce cooldown: skip if the last auto-backup was too recent.
+    89	                if now - self._last_backup_time < self.backup_cooldown_seconds:
+    90	                    return
+    91	                # Skip if the save hasn't actually changed since the last backup.
+    92	                # On Windows, watchdog can fire on spurious events (AV, indexing,
+    93	                # attribute changes). We guard against this by comparing mtims.
+    94	                try:
+    95	                    current_mtime = get_save_modified_time(self.save)
+    96	                except OSError:
+    97	                    return
+    98	                if current_mtime <= self._last_backup_mtime:
+    99	                    return
+   100	                backup = create_backup(self.save.game_mode, self.save.name, auto=True)
+   101	                self._backups.append(backup)
+   102	                self._last_backup_time = now
+   103	                self._last_backup_mtime = current_mtime
+   104	                callback = self.on_backup
+   105	        except Exception as e:
+   106	            import logging
+   107	            logger = logging.getLogger(__name__)
+   108	            logger.error("Auto-backup failed for %s/%s: %s", self.save.game_mode, self.save.name, e, exc_info=True)
+   109	            return
+   110	        if backup is not None and callback:
+   111	            callback(backup)
+   112	
+   113	
+   114	class WatcherManager:
+   115	    """Manages multiple SaveWatcher instances."""
+   116	
+   117	    def __init__(self) -> None:
+   118	        self._observer = Observer()
+   119	        self._watchers: dict[str, SaveWatcher] = {}
+   120	        self._watches: dict[str, object] = {}  # watchdog handles
+   121	        self._running = False
+   122	
+   123	    @property
+   124	    def running(self) -> bool:
+   125	        return self._running
+   126	
+   127	    def start(self) -> None:
+   128	        if not self._running:
+   129	            if not self._observer.is_alive():
+   130	                self._observer = Observer()
+   131	                # Re-schedule all watched saves
+   132	                for key, watcher in list(self._watchers.items()):
+   133	                    save = watcher.save
+   134	                    handle = self._observer.schedule(watcher, str(save.path), recursive=True)
+   135	                    self._watches[key] = handle
+   136	            self._observer.start()
+   137	            self._running = True
+   138	
+   139	    def stop(self) -> None:
+   140	        for watcher in list(self._watchers.values()):
+   141	            watcher.cancel_pending()
+   142	        if self._running:
+   143	            self._observer.stop()
+   144	            self._observer.join(timeout=5)
+   145	            self._running = False
+   146	
+   147	    def watch(self, save: SaveGame, debounce_seconds: float = 5.0, backup_cooldown_seconds: float = 300.0) -> SaveWatcher:
+   148	        key = save.display_name
+   149	        if key in self._watchers:
+   150	            return self._watchers[key]
+   151	        watcher = SaveWatcher(save, debounce_seconds, backup_cooldown_seconds)
+   152	        self._watchers[key] = watcher
+   153	        handle = self._observer.schedule(watcher, str(save.path), recursive=True)
+   154	        self._watches[key] = handle
+   155	        return watcher
+   156	
+   157	    def unwatch(self, save: SaveGame) -> None:
+   158	        key = save.display_name
+   159	        if key in self._watches:
+   160	            self._observer.unschedule(self._watches[key])
+   161	            del self._watches[key]
+   162	        if key in self._watchers:
+   163	            watcher = self._watchers.pop(key)
+   164	            watcher.cancel_pending()
+   165	
+   166	    def watched_saves(self) -> list[str]:
+   167	        return sorted(self._watchers.keys())
+   168	
+   169	    def get_backups(self, save: SaveGame) -> list[BackupRecord]:
+   170	        key = save.display_name
+   171	        if key in self._watchers:
+   172	            return list(self._watchers[key]._backups)
+   173	        return []
+   174	
+   175	    @contextmanager
+   176	    def pause_for(self, save: SaveGame):
+   177	        """Context manager: temporarily silence the watcher for `save`.
+   178	
+   179	        No-op if the save isn't being watched. After the block exits,
+   180	        the watcher resumes with a short grace window so any file
+   181	        events still in watchdog's queue from the operation get dropped
+   182	        instead of triggering an immediate auto-backup.
+   183	        """
+   184	        watcher = self._watchers.get(save.display_name)
+   185	        if watcher is not None:
+   186	            watcher.pause()
+   187	        try:
+   188	            yield
+   189	        finally:
+   190	            if watcher is not None:
+   191	                watcher.resume()
+   192	
+   193	
+   194	# Global instance
+   195	_manager: WatcherManager | None = None
+   196	
+   197	
+   198	def get_manager() -> WatcherManager:
+   199	    global _manager
+   200	    if _manager is None:
+   201	        _manager = WatcherManager()
+   202	    return _manager
+
+exec
+/bin/bash -lc "nl -ba /tmp/pz-review/src/pz_save_manager/gui.py | sed -n '222,570p'" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+   222	def index():
+   223	    try:
+   224	        manager = get_manager()
+   225	        saves = list_saves()
+   226	        # Per-save try/except: a single corrupt save shouldn't blank the page.
+   227	        save_infos = []
+   228	        for s in saves:
+   229	            try:
+   230	                save_infos.append(_save_info(s, manager))
+   231	            except Exception:
+   232	                import logging
+   233	                logging.getLogger(__name__).warning("could not read save %s", s.display_name, exc_info=True)
+   234	        all_backups = list_backups()
+   235	        all_b = []
+   236	        for b in all_backups:
+   237	            # Only player_dead is used in the card; reading just players.db is
+   238	            # O(1) versus extract_all which reads every metadata file. Backups
+   239	            # also have b.size_mb / b.file_count properties that rglob — skip
+   240	            # those in the list view, surface them lazily if/when needed.
+   241	            pi = player_info(b.path) or {}
+   242	            display_name = b.save_name
+   243	            all_b.append({
+   244	                "game_mode": b.game_mode, "save_name": display_name, "real_save_name": b.save_name,
+   245	                "timestamp": b.timestamp, "auto": b.auto, "age": b.age, "formatted": b.formatted,
+   246	                "has_thumbnail": (b.path / "thumb.png").is_file(),
+   247	                "player": pi.get("name"),
+   248	                "player_dead": pi.get("is_dead"),
+   249	                "note": get_backup_note(b.path),
+   250	            })
+   251	        return render_template_string(PAGE, saves=save_infos, all_backups=all_b, watcher_running=manager.running)
+   252	    except Exception:
+   253	        import traceback
+   254	        tb = traceback.format_exc()
+   255	        import logging
+   256	        logging.getLogger(__name__).exception("index render failed")
+   257	        return (
+   258	            "<!doctype html><meta charset='utf-8'>"
+   259	            "<style>body{font-family:monospace;background:#111;color:#eee;padding:2rem}"
+   260	            "pre{white-space:pre-wrap;background:#222;padding:1rem;border-radius:6px}"
+   261	            "a{color:#e94560}</style>"
+   262	            "<h2>PZ Save Manager — internal error</h2>"
+   263	            f"<p>The page failed to render. <a href='/health'>Open /health</a> for diagnostics.</p>"
+   264	            f"<pre>{escape(tb)}</pre>",
+   265	            500,
+   266	        )
+   267	
+   268	
+   269	@app.route("/health")
+   270	def health():
+   271	    """Plain-text diagnostic page — shows resolved paths and what was discovered.
+   272	
+   273	    Useful when a user reports a blank page: navigating to /health bypasses
+   274	    most of the rendering code and surfaces the underlying environment.
+   275	    """
+   276	    import json
+   277	    import platform as _platform
+   278	    import sys
+   279	    from . import __version__
+   280	
+   281	    saves_root = get_saves_root()
+   282	    backups_root = get_backups_root()
+   283	    info: dict = {
+   284	        "version": __version__,
+   285	        "python": sys.version,
+   286	        "executable": sys.executable,
+   287	        "platform": _platform.platform(),
+   288	        "frozen": getattr(sys, "frozen", False),
+   289	        "saves_root": str(saves_root),
+   290	        "saves_root_exists": saves_root.is_dir(),
+   291	        "backups_root": str(backups_root),
+   292	        "backups_root_exists": backups_root.is_dir(),
+   293	        "errors": [],
+   294	    }
+   295	    try:
+   296	        saves = list_saves()
+   297	        info["save_count"] = len(saves)
+   298	        info["saves"] = [{"game_mode": s.game_mode, "name": s.name, "path": str(s.path)} for s in saves]
+   299	    except Exception as e:
+   300	        info["errors"].append(f"list_saves: {e!r}")
+   301	    try:
+   302	        info["backup_count"] = len(list_backups())
+   303	    except Exception as e:
+   304	        info["errors"].append(f"list_backups: {e!r}")
+   305	    if saves_root.is_dir():
+   306	        try:
+   307	            info["saves_root_children"] = sorted(p.name for p in saves_root.iterdir())
+   308	        except Exception as e:
+   309	            info["errors"].append(f"iterdir saves_root: {e!r}")
+   310	    else:
+   311	        zomboid = saves_root.parent
+   312	        info["zomboid_dir_exists"] = zomboid.is_dir()
+   313	        if zomboid.is_dir():
+   314	            try:
+   315	                info["zomboid_dir_children"] = sorted(p.name for p in zomboid.iterdir())
+   316	            except Exception as e:
+   317	                info["errors"].append(f"iterdir zomboid: {e!r}")
+   318	
+   319	    return (
+   320	        "<!doctype html><meta charset='utf-8'>"
+   321	        "<style>body{font-family:monospace;background:#111;color:#eee;padding:2rem}"
+   322	        "pre{white-space:pre-wrap;background:#222;padding:1rem;border-radius:6px}</style>"
+   323	        "<h2>PZ Save Manager — /health</h2>"
+   324	        f"<pre>{escape(json.dumps(info, indent=2, default=str))}</pre>"
+   325	    )
+   326	
+   327	
+   328	def _need(data: dict | None, *keys: str):
+   329	    """Return (data, None) if all keys present, else (None, error_response)."""
+   330	    if not isinstance(data, dict) or not all(k in data and data[k] for k in keys):
+   331	        return None, (jsonify({"ok": False, "error": f"Missing fields: {', '.join(keys)}"}), 400)
+   332	    return data, None
+   333	
+   334	
+   335	@app.route("/api/backup", methods=["POST"])
+   336	def api_backup():
+   337	    data, err = _need(request.get_json(silent=True), "game_mode", "save_name")
+   338	    if err:
+   339	        return err
+   340	    try:
+   341	        b = create_backup(data["game_mode"], data["save_name"])
+   342	        return jsonify({"ok": True, "timestamp": b.timestamp})
+   343	    except (SaveNotFound, BackupError) as e:
+   344	        return jsonify({"ok": False, "error": str(e)}), 400
+   345	
+   346	
+   347	@app.route("/api/restore", methods=["POST"])
+   348	def api_restore():
+   349	    data, err = _need(request.get_json(silent=True), "game_mode", "save_name", "timestamp")
+   350	    if err:
+   351	        return err
+   352	    from contextlib import nullcontext
+   353	    from .saves import get_save
+   354	    manager = get_manager()
+   355	    # If the target save is currently being watched, suppress watcher events
+   356	    # while restore writes files in — otherwise the watcher would create an
+   357	    # immediate auto-backup of the just-restored content.
+   358	    try:
+   359	        live_save = get_save(data["game_mode"], data["save_name"])
+   360	        pause_ctx = manager.pause_for(live_save)
+   361	    except SaveNotFound:
+   362	        pause_ctx = nullcontext()
+   363	    with pause_ctx:
+   364	        try:
+   365	            restore_backup(data["game_mode"], data["save_name"], data["timestamp"])
+   366	            return jsonify({"ok": True})
+   367	        except (BackupNotFound, BackupError) as e:
+   368	            return jsonify({"ok": False, "error": str(e)}), 400
+   369	
+   370	
+   371	@app.route("/api/backup/delete", methods=["POST"])
+   372	def api_delete_backup():
+   373	    data, err = _need(request.get_json(silent=True), "game_mode", "save_name", "timestamp")
+   374	    if err:
+   375	        return err
+   376	    try:
+   377	        delete_backup(data["game_mode"], data["save_name"], data["timestamp"])
+   378	        return jsonify({"ok": True, "message": "Backup deleted"})
+   379	    except (BackupNotFound, BackupError) as e:
+   380	        return jsonify({"ok": False, "error": str(e)}), 400
+   381	
+   382	
+   383	@app.route("/api/save/rename", methods=["POST"])
+   384	def api_rename_save():
+   385	    data, err = _need(request.get_json(silent=True), "game_mode", "old_name", "new_name")
+   386	    if err:
+   387	        return err
+   388	    from .saves import SaveManagerError, rename_save
+   389	    from .backup import preflight_rename, rename_backups_for_save
+   390	    manager = get_manager()
+   391	    try:
+   392	        preflight_rename(data["game_mode"], data["old_name"], data["new_name"])
+   393	        # Resolve the save before renaming so we can pause the watcher
+   394	        from .saves import get_save
+   395	        live_save = get_save(data["game_mode"], data["old_name"])
+   396	        with manager.pause_for(live_save):
+   397	            new_save = rename_save(data["game_mode"], data["old_name"], data["new_name"])
+   398	            # Move backups alongside
+   399	            n = rename_backups_for_save(data["game_mode"], data["old_name"], data["new_name"])
+   400	            # Update watcher if the old name was watched
+   401	            if live_save.display_name in manager.watched_saves():
+   402	                manager.unwatch(live_save)
+   403	                manager.watch(new_save)
+   404	    except (SaveManagerError, BackupError, SaveNotFound) as e:
+   405	        return jsonify({"ok": False, "error": str(e)}), 400
+   406	    return jsonify({"ok": True, "message": f"Save renamed to {data['new_name']}", "backups_moved": n})
+   407	
+   408	
+   409	@app.route("/api/backup/annotate", methods=["POST"])
+   410	def api_annotate_backup():
+   411	    data, err = _need(request.get_json(silent=True), "game_mode", "save_name", "timestamp")
+   412	    if err:
+   413	        return err
+   414	    note = (data or {}).get("note", "")
+   415	    try:
+   416	        backup = get_backup(data["game_mode"], data["save_name"], data["timestamp"])
+   417	        set_backup_note(backup.path, note)
+   418	    except (BackupNotFound, BackupError) as e:
+   419	        return jsonify({"ok": False, "error": str(e)}), 400
+   420	    return jsonify({"ok": True, "message": "Note saved" if note else "Note removed"})
+   421	
+   422	
+   423	@app.route("/api/watcher/toggle", methods=["POST"])
+   424	def api_watcher_toggle():
+   425	    manager = get_manager()
+   426	    if manager.running:
+   427	        manager.stop()
+   428	        return jsonify({"ok": True, "message": "Watcher stopped"})
+   429	    saves = list_saves()
+   430	    cooldown = config_get_all().get("backup_cooldown_minutes", 5) * 60
+   431	    for s in saves:
+   432	        manager.watch(s, backup_cooldown_seconds=cooldown)
+   433	    manager.start()
+   434	    return jsonify({"ok": True, "message": f"Watcher started ({len(saves)} saves)"})
+   435	
+   436	
+   437	@app.route("/api/watcher/save", methods=["POST"])
+   438	def api_watcher_save():
+   439	    data, err = _need(request.get_json(silent=True), "game_mode", "save_name")
+   440	    if err:
+   441	        return err
+   442	    from .saves import get_save
+   443	    try:
+   444	        save = get_save(data["game_mode"], data["save_name"])
+   445	    except SaveNotFound:
+   446	        return jsonify({"ok": False, "error": "Save not found"}), 404
+   447	    manager = get_manager()
+   448	    if save.display_name in manager.watched_saves():
+   449	        manager.unwatch(save)
+   450	        return jsonify({"ok": True, "message": f"Unwatched {save.name}"})
+   451	    manager.watch(save)
+   452	    if not manager.running:
+   453	        manager.start()
+   454	    return jsonify({"ok": True, "message": f"Watching {save.name}"})
+   455	
+   456	
+   457	@app.route("/api/config", methods=["GET", "POST"])
+   458	def api_config():
+   459	    """Get or update configuration."""
+   460	    if request.method == "GET":
+   461	        return jsonify(config_get_all())
+   462	    data = request.get_json(silent=True) or {}
+   463	    try:
+   464	        for key, value in data.items():
+   465	            # Allow clearing string-typed settings (e.g. resetting backups_dir to default)
+   466	            if key == "backups_dir":
+   467	                config_set(key, value if value else None)
+   468	                continue
+   469	            if value is None or value == "":
+   470	                continue
+   471	            if key == "debounce_seconds":
+   472	                value = float(value)
+   473	            elif key == "backup_cooldown_minutes":
+   474	                value = int(value)
+   475	            elif key == "max_auto_backups":
+   476	                value = int(value)
+   477	            elif key == "port":
+   478	                value = int(value)
+   479	            elif key == "auto_start_watcher":
+   480	                if not isinstance(value, bool):
+   481	                    value = str(value).lower() in ("true", "1", "yes")
+   482	            config_set(key, value)
+   483	    except (ValueError, TypeError) as e:
+   484	        return jsonify({"ok": False, "error": f"Invalid value: {e}"}), 400
+   485	    return jsonify({"ok": True, "message": "Settings saved", "config": config_get_all()})
+   486	
+   487	
+   488	@app.route("/thumb-backup/<game_mode>/<save_name>/<timestamp>")
+   489	def serve_backup_thumbnail(game_mode: str, save_name: str, timestamp: str):
+   490	    from .backup import get_backup
+   491	    try:
+   492	        backup = get_backup(game_mode, save_name, timestamp)
+   493	        thumb = backup.path / "thumb.png"
+   494	        if thumb.is_file():
+   495	            return send_file(thumb, mimetype="image/png")
+   496	    except Exception:
+   497	        pass
+   498	    return "", 404
+   499	
+   500	
+   501	@app.route("/thumb/<game_mode>/<save_name>")
+   502	def serve_thumbnail(game_mode: str, save_name: str):
+   503	    from .saves import get_save
+   504	    try:
+   505	        save = get_save(game_mode, save_name)
+   506	        thumb = save.path / "thumb.png"
+   507	        if thumb.is_file():
+   508	            return send_file(thumb, mimetype="image/png")
+   509	    except Exception:
+   510	        pass
+   511	    return "", 404
+   512	
+   513	
+   514	@app.route("/api/shutdown", methods=["POST"])
+   515	def api_shutdown():
+   516	    """Gracefully stop the server."""
+   517	    manager = get_manager()
+   518	    if manager.running:
+   519	        manager.stop()
+   520	
+   521	    # Capture the Werkzeug shutdown function while we're still inside the
+   522	    # Flask request context.  The Timer callback runs in a different thread
+   523	    # where flask.request (a thread-local proxy) is empty.
+   524	    shutdown_func = request.environ.get("werkzeug.server.shutdown")
+   525	
+   526	    def _shutdown() -> None:
+   527	        import os
+   528	        import sys
+   529	        if shutdown_func is not None:
+   530	            try:
+   531	                shutdown_func()
+   532	                return
+   533	            except Exception:
+   534	                pass
+   535	        # sys.exit only kills the request thread, not the main process.
+   536	        # Try it anyway (works in some WSGI servers), but fall back to
+   537	        # os._exit as last resort. The 3-second delay ensures the HTTP
+   538	        # response has time to flush before the process dies.
+   539	        try:
+   540	            sys.exit(0)
+   541	        except SystemExit:
+   542	            pass
+   543	        os._exit(0)
+   544	
+   545	    from threading import Timer
+   546	    Timer(3.0, _shutdown).start()
+   547	    return jsonify({"ok": True, "message": "Shutting down..."})
+   548	
+   549	
+   550	def run_gui(host: str = "127.0.0.1", port: int = 8080) -> None:
+   551	    import webbrowser
+   552	    url = f"http://{host}:{port}"
+   553	    saves_root = get_saves_root()
+   554	    try:
+   555	        save_count = len(list_saves())
+   556	    except Exception as e:
+   557	        save_count = f"error: {e!r}"
+   558	    print(f"\n  PZ Save Manager - {url}")
+   559	    print(f"  Saves dir : {saves_root} (exists={saves_root.is_dir()})")
+   560	    print(f"  Backups   : {get_backups_root()}")
+   561	    print(f"  Found     : {save_count} save(s)")
+   562	    print(f"  Diagnostics: {url}/health\n")
+   563	    webbrowser.open(url)
+   564	    app.run(host=host, port=port, debug=False)
+
+exec
+/bin/bash -lc "nl -ba /tmp/pz-review/src/pz_save_manager/saves.py | sed -n '113,170p'" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+   113	def get_save(game_mode: str, save_name: str, saves_root: Path | str | None = None) -> SaveGame:
+   114	    """Return a specific save or raise SaveNotFound."""
+   115	    # P0: prevent path traversal — reject '..', '/', '\\' and null bytes in components
+   116	    for val, label in ((game_mode, "game_mode"), (save_name, "save_name")):
+   117	        if ".." in val or "/" in val or "\\" in val or "\x00" in val:
+   118	            raise SaveNotFound(f"Invalid {label}: {val!r}")
+   119	    root = _to_root(saves_root)
+   120	    path = root / game_mode / save_name
+   121	    if not path.is_dir():
+   122	        raise SaveNotFound(f"Save not found: {game_mode}/{save_name}")
+   123	    return SaveGame(game_mode, save_name, path)
+   124	
+   125	
+   126	_SANE_NAME_RE = re.compile(r'^[^/\x00]{1,200}$')
+   127	
+   128	
+   129	def _validate_name(value: str, label: str) -> None:
+   130	    """Reject empty, path-traversal, IP-shaped, or otherwise dangerous names."""
+   131	    if not value or not value.strip():
+   132	        raise SaveManagerError(f"{label} cannot be empty")
+   133	    if ".." in value or "/" in value or "\\" in value or "\x00" in value:
+   134	        raise SaveManagerError(f"Invalid {label}: {value!r}")
+   135	    if _is_multiplayer(value.strip()):
+   136	        raise SaveManagerError(f"{label} looks like a server address: {value!r}")
+   137	    if not _SANE_NAME_RE.match(value):
+   138	        raise SaveManagerError(f"Invalid characters in {label}: {value!r}")
+   139	    if len(value.strip()) > 200:
+   140	        raise SaveManagerError(f"{label} is too long (max 200 characters)")
+   141	
+   142	
+   143	def rename_save(
+   144	    game_mode: str,
+   145	    old_name: str,
+   146	    new_name: str,
+   147	    *,
+   148	    saves_root: Path | str | None = None,
+   149	) -> SaveGame:
+   150	    """Rename a save directory. Raises SaveManagerError on invalid names or conflicts."""
+   151	    _validate_name(game_mode, "game_mode")
+   152	    _validate_name(old_name, "old_name")
+   153	    _validate_name(new_name, "new_name")
+   154	
+   155	    old = get_save(game_mode, old_name, saves_root=saves_root)
+   156	    root = _to_root(saves_root)
+   157	    new_path = root / game_mode / new_name.strip()
+   158	    if new_path.exists():
+   159	        raise SaveManagerError(f"Cannot rename save to {new_name!r}: Destination already exists: {new_name!r}")
+   160	    try:
+   161	        old.path.rename(new_path)
+   162	    except OSError as e:
+   163	        raise SaveManagerError(f"Cannot rename save to {new_name!r}: {e}") from e
+   164	    return SaveGame(game_mode, new_name.strip(), new_path)
+
+codex
+{
+  "findings": [
+    {
+      "id": "A1",
+      "severity": "blocker",
+      "file": "src/pz_save_manager/gui.py",
+      "line": 335,
+      "category": "security",
+      "title": "Unauthenticated HTTP API performs privileged filesystem actions",
+      "description": "The Flask GUI exposes POST endpoints that create backups, restore live saves, delete backup directories, rename saves, mutate config, start/stop watchers, and terminate the process. None of these routes require authentication, CSRF protection, Origin/Host validation, or a loopback-only guard. The app defaults to 127.0.0.1, but run_gui accepts arbitrary hosts and the CLI exposes --host, so binding to 0.0.0.0 turns this into a remote destructive API.",
+      "suggestion": "Require a per-session random token for all mutating endpoints, validate Origin/Host, and refuse non-loopback binds unless authentication is explicitly configured. Keep shutdown/config/delete/restore behind the same authorization boundary."
+    },
+    {
+      "id": "A2",
+      "severity": "blocker",
+      "file": "src/pz_save_manager/backup.py",
+      "line": 314,
+      "category": "security",
+      "title": "Backup deletion trusts any directory under a configurable root",
+      "description": "delete_backup calls get_backup and then shutil.rmtree on the resolved path, but get_backup only checks that the path is a directory. Because backups_dir is user-configurable through /api/config, a malicious or mistaken configuration can make arbitrary existing directories look like backups. For example, with backups_dir set to '/', deleting game_mode='home', save_name='<user>', timestamp='Documents' would target /home/<user>/Documents if it exists.",
+      "suggestion": "Make backup ownership explicit. Store backups under an application-owned namespace, reject dangerous roots such as '/', the home directory, and the live saves root, canonicalize paths, and require a manager-created metadata marker before restore/delete/prune operations can treat a directory as a backup."
+    },
+    {
+      "id": "A3",
+      "severity": "major",
+      "file": "src/pz_save_manager/backup.py",
+      "line": 194,
+      "category": "concurrency",
+      "title": "Backup creation publishes incomplete backup directories",
+      "description": "create_backup reserves the final destination directory before copying, then copies into a sibling temp directory and moves files into the already-visible destination. list_backups treats any directory as a valid backup, so concurrent UI/API reads can expose an empty or partially moved backup. If the process dies between mkdir and completion, a corrupt empty backup remains visible and can later be restored.",
+      "suggestion": "Keep in-progress backups outside the visible backup namespace or mark them incomplete. Only publish a backup by atomically renaming a fully populated temp directory into place, and have list_backups/restore/delete require a completion marker."
+    },
+    {
+      "id": "A4",
+      "severity": "major",
+      "file": "src/pz_save_manager/gui.py",
+      "line": 397,
+      "category": "design",
+      "title": "Save rename and backup rename are not transactional",
+      "description": "api_rename_save renames the live save first and then moves the backup history. If rename_backups_for_save fails after rename_save succeeds, the request returns an error but the live save has already moved, backups remain under the old name, and watcher state may not be updated. This violates the invariant that a save and its backup history share the same identity.",
+      "suggestion": "Move this workflow into a domain service that performs save rename, backup rename, and watcher update under one transaction-like operation. Add rollback for partial failure, or stage both renames through temporary names and commit only when both sides can succeed."
+    },
+    {
+      "id": "A5",
+      "severity": "major",
+      "file": "src/pz_save_manager/watcher.py",
+      "line": 117,
+      "category": "concurrency",
+      "title": "WatcherManager mutates shared observer state without synchronization",
+      "description": "WatcherManager owns mutable dictionaries, an Observer instance, and a running flag, but start, stop, watch, unwatch, watched_saves, pause_for, and get_manager are all unsynchronized. Flask can process concurrent requests while watchdog and Timer callbacks are active, so overlapping watcher toggles, save renames, and shutdowns can race, schedule duplicate watches, unschedule stale handles, or create two global managers.",
+      "suggestion": "Protect WatcherManager and the singleton initializer with an RLock, and make observer lifecycle transitions serialized. Consider an actor/command-queue model so all watch/unwatch/start/stop operations happen on one thread."
+    },
+    {
+      "id": "A6",
+      "severity": "major",
+      "file": "src/pz_save_manager/gui.py",
+      "line": 253,
+      "category": "security",
+      "title": "Diagnostics leak local paths and runtime details",
+      "description": "The index error handler renders a full traceback to the browser, and /health exposes Python version, executable path, save paths, backup paths, save names, and directory children. This is sensitive local filesystem and environment data, especially when the GUI is reachable beyond loopback.",
+      "suggestion": "Return a generic error page by default and log tracebacks server-side. Gate /health and detailed diagnostics behind authentication or an explicit local debug mode."
+    }
+  ],
+  "overall_assessment": "The core backup and save operations have useful defensive pieces, but the architecture lacks a clear trust boundary and durable ownership model for backups. Destructive filesystem operations are exposed directly through the GUI, backup validity is inferred from directory shape, and watcher state is shared without synchronization.",
+  "verdict": "REJECT",
+  "summary": "2 blockers, 4 majors — security boundary and backup invariants need rework before approval"
+}
+tokens used
+58 901

@@ -1,0 +1,121 @@
+I have everything I need from the code provided in the prompt. Here is the review output:
+
+```json
+{
+  "findings": [
+    {
+      "id": "B1",
+      "severity": "major",
+      "file": "src/pz_save_manager/backup.py",
+      "line": 214,
+      "category": "bug",
+      "title": "get_backup() always returns auto=False — .pz-auto marker never read",
+      "description": "The return statement constructs `BackupRecord(game_mode, save_name, timestamp, path)` without checking whether `(path / _AUTO_FILE).is_file()`. The `auto` field is always False for every record returned by this function. By contrast, `list_backups()` correctly reads the marker. Any caller that inspects `.auto` gets wrong data. Currently this affects the GUI backup cards (auto vs. manual label), the annotate/restore/delete routes which surface the record, and any future code that gates on `auto`.",
+      "suggestion": "Before the return add `auto = (path / _AUTO_FILE).is_file()` and change the return to `return BackupRecord(game_mode, save_name, timestamp, path, auto=auto)`."
+    },
+    {
+      "id": "B2",
+      "severity": "major",
+      "file": "src/pz_save_manager/watcher.py",
+      "line": 177,
+      "category": "bug",
+      "title": "get_manager() singleton creation is not thread-safe",
+      "description": "The pattern `if _manager is None: _manager = WatcherManager()` is a bare test-and-set with no lock. Flask runs `threaded=True` by default: two concurrent requests can both observe `_manager is None` before either stores the new instance. The second WatcherManager is orphaned — its Observer is never started, and all subsequent watcher registrations go to the first instance while routes that get the second see stale/empty state. This is a silent data loss scenario (watches are registered but never fire).",
+      "suggestion": "Add a module-level `_manager_lock = threading.Lock()` and guard the check-and-create: `with _manager_lock: if _manager is None: _manager = WatcherManager()`."
+    },
+    {
+      "id": "B3",
+      "severity": "major",
+      "file": "src/pz_save_manager/watcher.py",
+      "line": 98,
+      "category": "bug",
+      "title": "create_backup() called while holding _lock — can stall watchdog dispatcher and drop events",
+      "description": "`create_backup()` is invoked inside `with self._lock:` in `_do_backup`. The watchdog dispatcher thread calls `on_modified()` for every file system event, and `on_modified` also acquires `_lock`. For a multi-gigabyte PZ save (thousands of chunk files), `create_backup` can take 30–120 s. During this entire window the watchdog dispatcher thread is blocked waiting for `_lock`. On Linux the kernel inotify queue has a default limit of 16,384 events; if the player is actively saving during this window the queue fills and fires `IN_Q_OVERFLOW`, silently dropping all further events. The next auto-backup trigger is lost.",
+      "suggestion": "Record guard state (cooldown, current_mtime) under the lock, release it, call `create_backup()` outside the lock, then re-acquire to update `_last_backup_time`, `_last_backup_mtime`, and `_backups`. Add a `_backup_in_progress` flag to prevent concurrent `_do_backup` calls."
+    },
+    {
+      "id": "B4",
+      "severity": "minor",
+      "file": "src/pz_save_manager/save_info.py",
+      "line": 58,
+      "category": "bug",
+      "title": "Falsy coordinate check treats x=0.0 (valid) the same as NULL",
+      "description": "`\"x\": round(row[2]) if row[2] else 0` uses a truthiness test. A player standing at world coordinate 0.0 (valid on some maps) returns `0` via the falsy shortcut, not via `round(0.0)`. More importantly: if the column is NULL in the DB, `row[2]` is `None` (falsy) and the function silently returns `0`, making a missing/unknown position look like `(0, 0, 0)`. The GUI's `{% if save.player_x is not none %}` guard then renders the coordinates as if they were known. Applies to y (row[3]) and z (row[4]) identically.",
+      "suggestion": "Use `round(row[2]) if row[2] is not None else None` for all three coordinate columns and update the GUI template to handle `None`."
+    },
+    {
+      "id": "B5",
+      "severity": "minor",
+      "file": "src/pz_save_manager/save_info.py",
+      "line": 52,
+      "category": "edge_case",
+      "title": "sqlite3 context manager does not close connections — file handle leak",
+      "description": "Python's `sqlite3.Connection` as a context manager only commits/rolls back the transaction; it does NOT call `close()`. `player_info()`, `count_vehicles()`, and `count_players()` all use `with sqlite3.connect(...) as conn:` without an explicit close. On Windows, an open SQLite handle prevents the same file from being opened exclusively by another process (notably PZ itself). On any OS, leaked handles accumulate during a long GUI session and can hit the per-process fd limit.",
+      "suggestion": "Replace with `contextlib.closing`: `with contextlib.closing(sqlite3.connect(f'file:{path}?mode=ro', uri=True)) as conn:`, or add an explicit `conn.close()` in a `finally` block."
+    },
+    {
+      "id": "B6",
+      "severity": "minor",
+      "file": "src/pz_save_manager/cli.py",
+      "line": 153,
+      "category": "error_handling",
+      "title": "config command type conversions raise uncaught ValueError on bad input",
+      "description": "In `config_command`, user-supplied values are cast with `float(value)` and `int(value)` outside any try/except. Running `pz-saves config debounce_seconds not-a-number` produces a raw Python traceback instead of a clean Click error message. The same issue affects `backup_cooldown_minutes`, `max_auto_backups`, and `port`.",
+      "suggestion": "Wrap the conversion block in `try: ... except (ValueError, TypeError) as e: raise click.ClickException(f'Invalid value for {key!r}: {e}') from e`."
+    },
+    {
+      "id": "B7",
+      "severity": "minor",
+      "file": "src/pz_save_manager/gui.py",
+      "line": 348,
+      "category": "bug",
+      "title": "Per-save watcher toggle ignores configured backup_cooldown_minutes",
+      "description": "`api_watcher_save` calls `manager.watch(save)` with no cooldown argument, defaulting to `SaveWatcher`'s hardcoded 300 s. The configured `backup_cooldown_minutes` is only applied in `api_watcher_toggle` (the global Start Watcher button). A user who watches individual saves via the per-save 👁 button silently gets a fixed 5-minute cooldown regardless of their setting.",
+      "suggestion": "Before calling `watch`, read the config: `cooldown = config_get_all().get('backup_cooldown_minutes', 5) * 60` then `manager.watch(save, backup_cooldown_seconds=cooldown)`."
+    },
+    {
+      "id": "B8",
+      "severity": "minor",
+      "file": "src/pz_save_manager/gui.py",
+      "line": 182,
+      "category": "quality",
+      "title": "Backup list silently truncated at 50 with no user-visible notice",
+      "description": "The Jinja template iterates `{% for b in all_backups[:50] %}`, capping the displayed list at 50 entries. A user with 51+ backups has no indication that older entries exist. This is particularly confusing when looking for a specific old backup to restore from — it simply is not there with no explanation.",
+      "suggestion": "Either remove the cap, or add a visible notice: `{% if all_backups|length > 50 %}<p style='color:var(--muted)'>Showing 50 of {{ all_backups|length }} backups.</p>{% endif %}`."
+    },
+    {
+      "id": "N1",
+      "severity": "nit",
+      "file": "src/pz_save_manager/cli.py",
+      "line": 131,
+      "category": "quality",
+      "title": "Dead import: `import flask` in gui_command is never used",
+      "description": "Inside the `if no_browser:` branch, `import flask` is immediately followed by `from .gui import app`, and `flask` is never referenced. The import is dead code.",
+      "suggestion": "Remove the `import flask` line."
+    },
+    {
+      "id": "N2",
+      "severity": "nit",
+      "file": "src/pz_save_manager/saves.py",
+      "line": 100,
+      "category": "quality",
+      "title": "Unreachable length check in _validate_name — dead code after regex",
+      "description": "`_SANE_NAME_RE = re.compile(r'^[^/\\x00]{1,200}$')` already enforces a 200-character maximum via `{1,200}`. The subsequent `if len(value.strip()) > 200: raise SaveManagerError(...)` is dead code — any value with more than 200 characters fails the regex before reaching this line.",
+      "suggestion": "Remove the `if len(value.strip()) > 200` block."
+    },
+    {
+      "id": "N3",
+      "severity": "nit",
+      "file": "src/pz_save_manager/backup.py",
+      "line": 263,
+      "category": "quality",
+      "title": "rename_backups_for_save relies on OS error for destination collision detection",
+      "description": "`old_dir.rename(new_dir)` is called without first checking `if new_dir.is_dir()`. On Linux the rename fails with `OSError: [Errno 39] Directory not empty`, which is caught and re-raised as a generic `BackupError`. `preflight_rename` (the expected gatekeeper) raises the clearer 'already has backups' message. If `rename_backups_for_save` is ever called directly the diagnostic is an OS error string.",
+      "suggestion": "Add before the rename: `if new_dir.is_dir(): raise BackupError(f\"Cannot rename backups: {new_save_name!r} already has backups\")`, mirroring the pattern in `preflight_rename`."
+    }
+  ],
+  "overall_assessment": "The codebase has strong security fundamentals — path traversal guards, symlink skipping, and TOCTOU-safe atomic backup creation are all correctly implemented and verified by the adversarial test suite. Three concurrency bugs stand out: `get_manager()` has a classic test-and-set race under Flask's default threaded mode; `_do_backup` holds the watcher lock across the entire `create_backup()` call, which can stall watchdog's event dispatcher and cause inotify queue overflow on large saves; and `get_backup()` silently returns wrong `auto` metadata. The sqlite3 connection leak pattern (three functions) is a portability hazard on Windows, and the CLI config command surfaces raw ValueError tracebacks on bad input. The rest are quality nits with no runtime impact.",
+  "verdict": "REQUEST_CHANGES",
+  "summary": "3 major bugs (get_manager race condition, lock held during backup I/O, get_backup missing auto flag), 5 minor issues (sqlite handle leak, CLI ValueError, coordinate null-check, per-save watcher cooldown ignored, silent backup list truncation), 3 nits (dead import, dead length check, implicit collision reliance in rename)"
+}
+```

@@ -1,0 +1,2464 @@
+Reading prompt from stdin...
+OpenAI Codex v0.133.0
+--------
+workdir: /home/chpo/pz-save-manager
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019e9e51-f6e3-7dc2-a109-05c172e536db
+--------
+user
+You are a **Devil's Advocate**. Review the findings of another reviewer.
+
+## Your mission
+For each finding from the other reviewer, classify it:
+- ✅ **VALIDATE**: You agree. This is a legitimate finding.
+- ⚠️ **CHALLENGE**: You disagree or think it's overstated. Explain why.
+- ➕ **ADD**: They found something valid that YOU missed in your own review. Admit it.
+
+## Output format (JSON only)
+{
+  "responses": [
+    {
+      "finding_id": "A1",
+      "action": "validate|challenge|add",
+      "rationale": "Why you agree/disagree. Be specific.",
+      "your_miss": true  // true if you ADD this finding as something you missed
+    }
+  ],
+  "new_findings": [
+    // Only if cross-review reveals NEW issues not in either original review
+  ],
+  "summary": "12 validated, 2 challenged, 3 new findings added"
+}
+
+## Rules
+- Be honest: admitting you missed something is a sign of quality, not weakness
+- Don't rubber-stamp: actually read each finding critically
+- When you challenge, provide technical counter-arguments, not opinions
+- If you have new findings triggered by reading the other review, add them as new_findings
+
+Other reviewer's findings:
+
+
+{
+  "findings": [
+    {
+      "id": "A1",
+      "severity": "major",
+      "file": "src/pz_save_manager/gui.py",
+      "line": 1,
+      "category": "security",
+      "title": "State-mutating HTTP endpoints have no authentication or CSRF/Host protection",
+      "description": "The Flask app exposes destructive, unauthenticated POST endpoints — /api/restore (overwrites the live save), /api/backup/delete, /api/save/rename, /api/config, and /api/shutdown. There is no CSRF token, no Origin/Referer check, and no Host-header allow-list. Even bound to 127.0.0.1, the server is reachable by any process/page on the machine, and is exposed to two real browser-based attacks while the GUI is running: (1) DNS-rebinding — a malicious site can rebind its hostname to 127.0.0.1 and then issue same-origin requests to port 8080, and (2) cross-origin requests that browsers permit without preflight. Because get_json(silent=True) is used, an attacker doesn't even need a valid JSON content type to reach the handler logic in some configurations. A single forged request to /api/restore can irrecoverably replace the user's current save with an old backup; /api/shutdown can kill the app. The --host option also lets a user trivially bind 0.0.0.0, exposing all of this to the LAN with zero auth.",
+      "suggestion": "Validate the Host header against an explicit allow-list (127.0.0.1:PORT / localhost:PORT) and reject everything else (blocks DNS-rebinding). Require a Origin/Referer same-origin check on all mutating routes, or issue a per-session CSRF token embedded in PAGE and verified server-side. Generate a random token at startup and require it as a header on /api/* calls. Refuse to bind a non-loopback host unless an explicit --allow-remote flag plus auth is supplied."
+    },
+    {
+      "id": "A2",
+      "severity": "major",
+      "file": "src/pz_save_manager/watcher.py",
+      "line": 120,
+      "category": "concurrency",
+      "title": "WatcherManager mutates shared state with no lock under a threaded Flask server",
+      "description": "Werkzeug's dev server runs with threaded=True by default, so /api/watcher/toggle, /api/watcher/save, /api/restore (pause_for), and /api/save/rename can execute concurrently in different request threads. All of them mutate WatcherManager._watchers, ._watches, ._running, and call self._observer.schedule/unschedule with no synchronization. start() additionally reads-then-rebuilds the observer and re-iterates _watchers while another thread may be inserting into it (RuntimeError: dict changed size during iteration), and watch()/unwatch() race on the same keys. This can corrupt the watch maps, double-schedule observers, or crash a request. The per-watcher SaveWatcher is internally locked, but the manager that owns them is not.",
+      "suggestion": "Add a threading.Lock (or RLock) to WatcherManager and guard every method that touches _watchers/_watches/_running/_observer. Snapshot collections under the lock before iterating (e.g. list(self._watchers.items())) and never call observer.schedule while holding it if that can deadlock with the observer thread — design the critical sections accordingly."
+    },
+    {
+      "id": "A3",
+      "severity": "major",
+      "file": "src/pz_save_manager/watcher.py",
+      "line": 205,
+      "category": "concurrency",
+      "title": "get_manager() lazy singleton has a check-then-act race",
+      "description": "get_manager() does `if _manager is None: _manager = WatcherManager()` with no lock. Under the threaded Flask server, two concurrent first requests (e.g. index render + an /api/* call) can both observe None and each construct a WatcherManager, each with its own watchdog Observer. One instance is then discarded but may already have been started/scheduled, leaking an observer thread and producing inconsistent watcher state depending on which manager each later request happens to read.",
+      "suggestion": "Guard initialization with a module-level threading.Lock using double-checked locking, or instantiate the singleton eagerly at import time. Given the manager owns OS threads, a single authoritative instance is important."
+    },
+    {
+      "id": "A4",
+      "severity": "major",
+      "file": "src/pz_save_manager/watcher.py",
+      "line": 95,
+      "category": "concurrency",
+      "title": "_do_backup holds the watcher lock across the entire copytree",
+      "description": "_do_backup acquires self._lock and then calls create_backup(...) — a full shutil.copytree of a PZ save that can be hundreds of MB to gigabytes — while still holding the lock. on_modified(), pause(), cancel_pending(), and resume() all block on the same lock, so the watchdog observer thread (which calls on_modified) is stalled for the entire duration of the copy. This defeats debouncing, lets the watchdog event queue back up, and makes pause_for() during a concurrent restore block until the in-flight backup finishes. The lock should only protect the small bookkeeping (timer, timestamps, ignore window), not the long I/O.",
+      "suggestion": "Inside the lock, re-check cooldown/mtime and capture the decision + clear the timer; then release the lock and perform create_backup outside it; re-acquire briefly only to append to _backups and update _last_backup_time/_last_backup_mtime. Guard against overlapping backups with a separate 'in progress' flag rather than the bookkeeping lock."
+    },
+    {
+      "id": "A5",
+      "severity": "minor",
+      "file": "src/pz_save_manager/gui.py",
+      "line": 372,
+      "category": "security",
+      "title": "/api/config writes arbitrary keys with no allow-list",
+      "description": "api_config iterates over every key in the posted JSON and calls config_set(key, value) for all of them. There is no allow-list of permitted settings, so a forged or buggy client can pollute config.json with arbitrary keys, and can repoint backups_dir to any path the user can write (e.g. a synced/cloud folder or a location chosen to clobber unrelated files via the game_mode/save_name/timestamp tree). Combined with A1 this is reachable cross-origin.",
+      "suggestion": "Restrict writes to the known DEFAULTS keys; reject unknown keys with a 400. For backups_dir, validate it is an absolute, writable directory and not a sensitive system path before persisting."
+    },
+    {
+      "id": "A6",
+      "severity": "minor",
+      "file": "src/pz_save_manager/backup.py",
+      "line": 130,
+      "category": "design",
+      "title": "Path-component validation is duplicated three ways across modules",
+      "description": "There are three overlapping validators: saves.get_save() inline check (.., /, \\, \\x00), saves._validate_name() (adds empty/IP/length/_SANE_NAME_RE), and backup._validate_component() (adds empty/'.'/timestamp). They diverge subtly — e.g. _validate_component rejects '.' and empty while get_save does not, and only _validate_name rejects IP-shaped/over-long names. This is exactly the kind of security boundary where drift causes a bypass, and CLAUDE.md explicitly says to reuse _validate_component. The knowledge is spread across two modules with no single source of truth.",
+      "suggestion": "Centralize one validate_component(value, label) in a single module (e.g. saves.py) and have backup.py, get_save, and rename paths all call it. Keep the stricter superset (reject '', '.', '..', '/', '\\', '\\x00', overlong) in one place and unit-test it once."
+    },
+    {
+      "id": "A7",
+      "severity": "minor",
+      "file": "src/pz_save_manager/backup.py",
+      "line": 200,
+      "category": "architecture",
+      "title": "Backups have no completion marker — a crash mid-move leaves a partial backup indistinguishable from a good one",
+      "description": "create_backup reserves the destination dir, copies into a sibling temp, then moves items into the destination one-by-one. The reserved destination directory exists from the very first mkdir. If the process is killed during the per-item move loop (or during the copytree before it), list_backups() will still enumerate the half-populated destination directory as a valid BackupRecord, and restore_backup will happily restore a truncated save over the live one. The atomicity claim in CLAUDE.md ('atomically move contents') only holds per-file, not for the backup as a whole.",
+      "suggestion": "Write a completion sentinel (e.g. .pz-complete) as the final step of create_backup, and have list_backups/get_backup ignore (or flag) destinations lacking it. Alternatively build the backup fully in the temp dir and do a single atomic rename of the temp dir onto the final destination, abandoning the move-loop."
+    },
+    {
+      "id": "A8",
+      "severity": "minor",
+      "file": "src/pz_save_manager/gui.py",
+      "line": 340,
+      "category": "design",
+      "title": "Configured debounce/cooldown are ignored on the per-save watch path",
+      "description": "api_watcher_save calls manager.watch(save) with the hardcoded defaults (debounce 5s, cooldown 300s), while api_watcher_toggle passes the configured backup_cooldown_minutes. So whether your cooldown setting is honored depends on which button started watching — 'Watch' on a single save silently ignores the user's configured cooldown and debounce entirely. debounce_seconds from config is never threaded into the watcher at all.",
+      "suggestion": "Read debounce_seconds and backup_cooldown_minutes from config in a single helper and pass them consistently from both watch entry points (and from auto_start_watcher startup if added)."
+    },
+    {
+      "id": "A9",
+      "severity": "nit",
+      "file": "src/pz_save_manager/gui.py",
+      "line": 339,
+      "category": "design",
+      "title": "Inconsistent default for backup_cooldown_minutes",
+      "description": "api_watcher_toggle uses config_get_all().get('backup_cooldown_minutes', 5), but config.DEFAULTS sets backup_cooldown_minutes to 1. The inline fallback of 5 is dead (get_all always fills the default) but signals a stale assumption and would mislead a maintainer about the real default.",
+      "suggestion": "Drop the redundant inline default and rely on DEFAULTS, or align the literal with DEFAULTS so the intended value is unambiguous."
+    },
+    {
+      "id": "A10",
+      "severity": "nit",
+      "file": "src/pz_save_manager/cli.py",
+      "line": 158,
+      "category": "design",
+      "title": "Dead import in gui_command --no-browser branch",
+      "description": "The --no-browser branch does `import flask` but never uses the module; it then imports app from .gui and calls app.run. The unused import is misleading and duplicates the run logic already in run_gui (which only differs by the webbrowser.open call), so the two startup paths can drift.",
+      "suggestion": "Remove the unused `import flask`. Refactor run_gui to take an open_browser: bool = True flag and have both CLI branches call it, eliminating the duplicated app.run/print block."
+    }
+  ],
+  "overall_assessment": "The core file-system safety work is genuinely good: path-traversal guards, symlink skipping, TOCTOU-safe destination reservation, restore staging with crash recovery, and atomic config writes are all present and backed by adversarial tests. The weak spots are at the boundaries the security tests don't cover: the Flask layer has no auth/CSRF/Host protection over destructive endpoints, and the WatcherManager concurrency model assumes single-threaded access that the default threaded Flask server violates. Validation logic is also duplicated across three functions, which is risky for a security boundary. None of these are catastrophic for a purely single-user loopback desktop tool, but they are real and fixable.",
+  "verdict": "REQUEST_CHANGES",
+  "summary": "0 blockers, 4 majors (web auth/CSRF, 3 concurrency in WatcherManager), 4 minors, 2 nits — solid FS safety, but the HTTP and threading boundaries need hardening."
+}
+codex
+I’ll inspect the cited files and routes so the response is grounded in the actual implementation, then I’ll return only the requested JSON.
+exec
+/bin/bash -lc "rg -n \"def api_|@app\\.route|run_gui|gui_command|get_manager|class WatcherManager|class SaveWatcher|def _do_backup|def create_backup|def list_backups|def restore_backup|def get_save|def _validate|DEFAULTS|backup_cooldown|debounce\" src tests CLAUDE.md" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+CLAUDE.md:32:- `watcher.py` — `SaveWatcher` (per-save debounced backup) + `WatcherManager` (singleton via `get_manager()`). The manager re-creates `Observer()` on restart because watchdog observers can't be reused after `.stop()`. Backup failures inside `_do_backup` must be logged (not silently swallowed) — the adversarial test enforces this.
+tests/test_adversarial.py:130:    watcher = watcher_mod.SaveWatcher(save, debounce_seconds=0)
+tests/test_watcher.py:17:def test_save_watcher_debounce(tmp_path: Path):
+tests/test_watcher.py:23:    watcher = SaveWatcher(save, debounce_seconds=0.05, on_backup=lambda b: backups.append(b))
+tests/test_watcher.py:64:    watcher = manager.watch(save, debounce_seconds=0.05, backup_cooldown_seconds=0.0)
+tests/test_watcher.py:87:    watcher = manager.watch(save, debounce_seconds=0.05, backup_cooldown_seconds=0.0)
+tests/test_watcher.py:105:    watcher = SaveWatcher(save, debounce_seconds=0.05, on_backup=lambda b: backups.append(b))
+tests/test_watcher.py:114:    # Sanity: an event while NOT paused arms the debounce timer.
+src/pz_save_manager/backup.py:132:def _validate_component(value: str, label: str) -> None:
+src/pz_save_manager/backup.py:177:def create_backup(
+src/pz_save_manager/backup.py:224:def list_backups(
+src/pz_save_manager/backup.py:270:def restore_backup(
+src/pz_save_manager/saves.py:36:def get_save_modified_time(save: SaveGame) -> float:
+src/pz_save_manager/saves.py:113:def get_save(game_mode: str, save_name: str, saves_root: Path | str | None = None) -> SaveGame:
+src/pz_save_manager/saves.py:129:def _validate_name(value: str, label: str) -> None:
+src/pz_save_manager/platforms.py:31:def get_saves_root(home: Path | str | None = None) -> Path:
+src/pz_save_manager/config.py:17:DEFAULTS = {
+src/pz_save_manager/config.py:19:    "debounce_seconds": 5.0,
+src/pz_save_manager/config.py:20:    "backup_cooldown_minutes": 1,
+src/pz_save_manager/config.py:60:    return DEFAULTS.get(key)
+src/pz_save_manager/config.py:72:    result = dict(DEFAULTS)
+src/pz_save_manager/cli.py:13:from .gui import run_gui
+src/pz_save_manager/cli.py:77:def list_backups_command(ctx: click.Context, game_mode: str | None, save_name: str | None) -> None:
+src/pz_save_manager/cli.py:134:def gui_command(host: str, port: int, no_browser: bool) -> None:
+src/pz_save_manager/cli.py:143:        run_gui(host, port)
+src/pz_save_manager/cli.py:166:    if key == "debounce_seconds":
+src/pz_save_manager/cli.py:168:    elif key == "backup_cooldown_minutes":
+src/pz_save_manager/watcher.py:17:class SaveWatcher(FileSystemEventHandler):
+src/pz_save_manager/watcher.py:23:        debounce_seconds: float = 5.0,
+src/pz_save_manager/watcher.py:24:        backup_cooldown_seconds: float = 300.0,
+src/pz_save_manager/watcher.py:28:        self.debounce_seconds = debounce_seconds
+src/pz_save_manager/watcher.py:29:        self.backup_cooldown_seconds = backup_cooldown_seconds
+src/pz_save_manager/watcher.py:44:        up the just-restored content. Any pending debounce timer is
+src/pz_save_manager/watcher.py:54:        """Cancel any pending debounce backup."""
+src/pz_save_manager/watcher.py:76:            self._timer = threading.Timer(self.debounce_seconds, self._do_backup)
+src/pz_save_manager/watcher.py:80:    def _do_backup(self) -> None:
+src/pz_save_manager/watcher.py:89:                if now - self._last_backup_time < self.backup_cooldown_seconds:
+src/pz_save_manager/watcher.py:114:class WatcherManager:
+src/pz_save_manager/watcher.py:147:    def watch(self, save: SaveGame, debounce_seconds: float = 5.0, backup_cooldown_seconds: float = 300.0) -> SaveWatcher:
+src/pz_save_manager/watcher.py:151:        watcher = SaveWatcher(save, debounce_seconds, backup_cooldown_seconds)
+src/pz_save_manager/watcher.py:198:def get_manager() -> WatcherManager:
+src/pz_save_manager/gui.py:16:from .watcher import WatcherManager, get_manager
+src/pz_save_manager/gui.py:190:function toggleSettings(){var o=document.getElementById('settings-overlay');if(o.style.display==='flex'){o.style.display='none'}else{o.style.display='flex';api('GET','/api/config').then(r=>r.json()).then(d=>{document.getElementById('cfg-backups-dir').value=d.backups_dir||'';document.getElementById("cfg-cooldown").value=d.backup_cooldown_minutes;document.getElementById("cfg-max-auto").value=d.max_auto_backups})}}
+src/pz_save_manager/gui.py:191:function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,backup_cooldown_minutes:document.getElementById("cfg-cooldown").value,max_auto_backups:document.getElementById("cfg-max-auto").value};doAction(null,'/api/config',data,'Settings saved!')}
+src/pz_save_manager/gui.py:221:@app.route("/")
+src/pz_save_manager/gui.py:224:        manager = get_manager()
+src/pz_save_manager/gui.py:269:@app.route("/health")
+src/pz_save_manager/gui.py:335:@app.route("/api/backup", methods=["POST"])
+src/pz_save_manager/gui.py:336:def api_backup():
+src/pz_save_manager/gui.py:347:@app.route("/api/restore", methods=["POST"])
+src/pz_save_manager/gui.py:348:def api_restore():
+src/pz_save_manager/gui.py:354:    manager = get_manager()
+src/pz_save_manager/gui.py:371:@app.route("/api/backup/delete", methods=["POST"])
+src/pz_save_manager/gui.py:372:def api_delete_backup():
+src/pz_save_manager/gui.py:383:@app.route("/api/save/rename", methods=["POST"])
+src/pz_save_manager/gui.py:384:def api_rename_save():
+src/pz_save_manager/gui.py:390:    manager = get_manager()
+src/pz_save_manager/gui.py:409:@app.route("/api/backup/annotate", methods=["POST"])
+src/pz_save_manager/gui.py:410:def api_annotate_backup():
+src/pz_save_manager/gui.py:423:@app.route("/api/watcher/toggle", methods=["POST"])
+src/pz_save_manager/gui.py:424:def api_watcher_toggle():
+src/pz_save_manager/gui.py:425:    manager = get_manager()
+src/pz_save_manager/gui.py:430:    cooldown = config_get_all().get("backup_cooldown_minutes", 5) * 60
+src/pz_save_manager/gui.py:432:        manager.watch(s, backup_cooldown_seconds=cooldown)
+src/pz_save_manager/gui.py:437:@app.route("/api/watcher/save", methods=["POST"])
+src/pz_save_manager/gui.py:438:def api_watcher_save():
+src/pz_save_manager/gui.py:447:    manager = get_manager()
+src/pz_save_manager/gui.py:457:@app.route("/api/config", methods=["GET", "POST"])
+src/pz_save_manager/gui.py:458:def api_config():
+src/pz_save_manager/gui.py:471:            if key == "debounce_seconds":
+src/pz_save_manager/gui.py:473:            elif key == "backup_cooldown_minutes":
+src/pz_save_manager/gui.py:488:@app.route("/thumb-backup/<game_mode>/<save_name>/<timestamp>")
+src/pz_save_manager/gui.py:501:@app.route("/thumb/<game_mode>/<save_name>")
+src/pz_save_manager/gui.py:514:@app.route("/api/shutdown", methods=["POST"])
+src/pz_save_manager/gui.py:515:def api_shutdown():
+src/pz_save_manager/gui.py:517:    manager = get_manager()
+src/pz_save_manager/gui.py:550:def run_gui(host: str = "127.0.0.1", port: int = 8080) -> None:
+
+exec
+/bin/bash -lc 'git status --short' in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+?? .adversarial-review-2/
+?? .adversarial-review-3/
+?? .adversarial-review/
+
+exec
+/bin/bash -lc 'rg --files src tests | sort' in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+src/pz_save_manager/__init__.py
+src/pz_save_manager/__main__.py
+src/pz_save_manager/backup.py
+src/pz_save_manager/cli.py
+src/pz_save_manager/config.py
+src/pz_save_manager/gui.py
+src/pz_save_manager/installer.py
+src/pz_save_manager/platforms.py
+src/pz_save_manager/save_info.py
+src/pz_save_manager/saves.py
+src/pz_save_manager/watcher.py
+tests/conftest.py
+tests/test_adversarial.py
+tests/test_backup.py
+tests/test_cli.py
+tests/test_gui.py
+tests/test_platforms.py
+tests/test_rename.py
+tests/test_save_info.py
+tests/test_saves.py
+tests/test_watcher.py
+
+codex
+I found the cited symbols. Next I’m reading the implementation around the Flask handlers, watcher manager, and backup lifecycle to separate real defects from risk inflation.
+exec
+/bin/bash -lc "sed -n '320,560p' src/pz_save_manager/gui.py" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+        "<!doctype html><meta charset='utf-8'>"
+        "<style>body{font-family:monospace;background:#111;color:#eee;padding:2rem}"
+        "pre{white-space:pre-wrap;background:#222;padding:1rem;border-radius:6px}</style>"
+        "<h2>PZ Save Manager — /health</h2>"
+        f"<pre>{escape(json.dumps(info, indent=2, default=str))}</pre>"
+    )
+
+
+def _need(data: dict | None, *keys: str):
+    """Return (data, None) if all keys present, else (None, error_response)."""
+    if not isinstance(data, dict) or not all(k in data and data[k] for k in keys):
+        return None, (jsonify({"ok": False, "error": f"Missing fields: {', '.join(keys)}"}), 400)
+    return data, None
+
+
+@app.route("/api/backup", methods=["POST"])
+def api_backup():
+    data, err = _need(request.get_json(silent=True), "game_mode", "save_name")
+    if err:
+        return err
+    try:
+        b = create_backup(data["game_mode"], data["save_name"])
+        return jsonify({"ok": True, "timestamp": b.timestamp})
+    except (SaveNotFound, BackupError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/restore", methods=["POST"])
+def api_restore():
+    data, err = _need(request.get_json(silent=True), "game_mode", "save_name", "timestamp")
+    if err:
+        return err
+    from contextlib import nullcontext
+    from .saves import get_save
+    manager = get_manager()
+    # If the target save is currently being watched, suppress watcher events
+    # while restore writes files in — otherwise the watcher would create an
+    # immediate auto-backup of the just-restored content.
+    try:
+        live_save = get_save(data["game_mode"], data["save_name"])
+        pause_ctx = manager.pause_for(live_save)
+    except SaveNotFound:
+        pause_ctx = nullcontext()
+    with pause_ctx:
+        try:
+            restore_backup(data["game_mode"], data["save_name"], data["timestamp"])
+            return jsonify({"ok": True})
+        except (BackupNotFound, BackupError) as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/backup/delete", methods=["POST"])
+def api_delete_backup():
+    data, err = _need(request.get_json(silent=True), "game_mode", "save_name", "timestamp")
+    if err:
+        return err
+    try:
+        delete_backup(data["game_mode"], data["save_name"], data["timestamp"])
+        return jsonify({"ok": True, "message": "Backup deleted"})
+    except (BackupNotFound, BackupError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/save/rename", methods=["POST"])
+def api_rename_save():
+    data, err = _need(request.get_json(silent=True), "game_mode", "old_name", "new_name")
+    if err:
+        return err
+    from .saves import SaveManagerError, rename_save
+    from .backup import preflight_rename, rename_backups_for_save
+    manager = get_manager()
+    try:
+        preflight_rename(data["game_mode"], data["old_name"], data["new_name"])
+        # Resolve the save before renaming so we can pause the watcher
+        from .saves import get_save
+        live_save = get_save(data["game_mode"], data["old_name"])
+        with manager.pause_for(live_save):
+            new_save = rename_save(data["game_mode"], data["old_name"], data["new_name"])
+            # Move backups alongside
+            n = rename_backups_for_save(data["game_mode"], data["old_name"], data["new_name"])
+            # Update watcher if the old name was watched
+            if live_save.display_name in manager.watched_saves():
+                manager.unwatch(live_save)
+                manager.watch(new_save)
+    except (SaveManagerError, BackupError, SaveNotFound) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    return jsonify({"ok": True, "message": f"Save renamed to {data['new_name']}", "backups_moved": n})
+
+
+@app.route("/api/backup/annotate", methods=["POST"])
+def api_annotate_backup():
+    data, err = _need(request.get_json(silent=True), "game_mode", "save_name", "timestamp")
+    if err:
+        return err
+    note = (data or {}).get("note", "")
+    try:
+        backup = get_backup(data["game_mode"], data["save_name"], data["timestamp"])
+        set_backup_note(backup.path, note)
+    except (BackupNotFound, BackupError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    return jsonify({"ok": True, "message": "Note saved" if note else "Note removed"})
+
+
+@app.route("/api/watcher/toggle", methods=["POST"])
+def api_watcher_toggle():
+    manager = get_manager()
+    if manager.running:
+        manager.stop()
+        return jsonify({"ok": True, "message": "Watcher stopped"})
+    saves = list_saves()
+    cooldown = config_get_all().get("backup_cooldown_minutes", 5) * 60
+    for s in saves:
+        manager.watch(s, backup_cooldown_seconds=cooldown)
+    manager.start()
+    return jsonify({"ok": True, "message": f"Watcher started ({len(saves)} saves)"})
+
+
+@app.route("/api/watcher/save", methods=["POST"])
+def api_watcher_save():
+    data, err = _need(request.get_json(silent=True), "game_mode", "save_name")
+    if err:
+        return err
+    from .saves import get_save
+    try:
+        save = get_save(data["game_mode"], data["save_name"])
+    except SaveNotFound:
+        return jsonify({"ok": False, "error": "Save not found"}), 404
+    manager = get_manager()
+    if save.display_name in manager.watched_saves():
+        manager.unwatch(save)
+        return jsonify({"ok": True, "message": f"Unwatched {save.name}"})
+    manager.watch(save)
+    if not manager.running:
+        manager.start()
+    return jsonify({"ok": True, "message": f"Watching {save.name}"})
+
+
+@app.route("/api/config", methods=["GET", "POST"])
+def api_config():
+    """Get or update configuration."""
+    if request.method == "GET":
+        return jsonify(config_get_all())
+    data = request.get_json(silent=True) or {}
+    try:
+        for key, value in data.items():
+            # Allow clearing string-typed settings (e.g. resetting backups_dir to default)
+            if key == "backups_dir":
+                config_set(key, value if value else None)
+                continue
+            if value is None or value == "":
+                continue
+            if key == "debounce_seconds":
+                value = float(value)
+            elif key == "backup_cooldown_minutes":
+                value = int(value)
+            elif key == "max_auto_backups":
+                value = int(value)
+            elif key == "port":
+                value = int(value)
+            elif key == "auto_start_watcher":
+                if not isinstance(value, bool):
+                    value = str(value).lower() in ("true", "1", "yes")
+            config_set(key, value)
+    except (ValueError, TypeError) as e:
+        return jsonify({"ok": False, "error": f"Invalid value: {e}"}), 400
+    return jsonify({"ok": True, "message": "Settings saved", "config": config_get_all()})
+
+
+@app.route("/thumb-backup/<game_mode>/<save_name>/<timestamp>")
+def serve_backup_thumbnail(game_mode: str, save_name: str, timestamp: str):
+    from .backup import get_backup
+    try:
+        backup = get_backup(game_mode, save_name, timestamp)
+        thumb = backup.path / "thumb.png"
+        if thumb.is_file():
+            return send_file(thumb, mimetype="image/png")
+    except Exception:
+        pass
+    return "", 404
+
+
+@app.route("/thumb/<game_mode>/<save_name>")
+def serve_thumbnail(game_mode: str, save_name: str):
+    from .saves import get_save
+    try:
+        save = get_save(game_mode, save_name)
+        thumb = save.path / "thumb.png"
+        if thumb.is_file():
+            return send_file(thumb, mimetype="image/png")
+    except Exception:
+        pass
+    return "", 404
+
+
+@app.route("/api/shutdown", methods=["POST"])
+def api_shutdown():
+    """Gracefully stop the server."""
+    manager = get_manager()
+    if manager.running:
+        manager.stop()
+
+    # Capture the Werkzeug shutdown function while we're still inside the
+    # Flask request context.  The Timer callback runs in a different thread
+    # where flask.request (a thread-local proxy) is empty.
+    shutdown_func = request.environ.get("werkzeug.server.shutdown")
+
+    def _shutdown() -> None:
+        import os
+        import sys
+        if shutdown_func is not None:
+            try:
+                shutdown_func()
+                return
+            except Exception:
+                pass
+        # sys.exit only kills the request thread, not the main process.
+        # Try it anyway (works in some WSGI servers), but fall back to
+        # os._exit as last resort. The 3-second delay ensures the HTTP
+        # response has time to flush before the process dies.
+        try:
+            sys.exit(0)
+        except SystemExit:
+            pass
+        os._exit(0)
+
+    from threading import Timer
+    Timer(3.0, _shutdown).start()
+    return jsonify({"ok": True, "message": "Shutting down..."})
+
+
+def run_gui(host: str = "127.0.0.1", port: int = 8080) -> None:
+    import webbrowser
+    url = f"http://{host}:{port}"
+    saves_root = get_saves_root()
+    try:
+        save_count = len(list_saves())
+    except Exception as e:
+        save_count = f"error: {e!r}"
+    print(f"\n  PZ Save Manager - {url}")
+    print(f"  Saves dir : {saves_root} (exists={saves_root.is_dir()})")
+    print(f"  Backups   : {get_backups_root()}")
+
+exec
+/bin/bash -lc "sed -n '1,240p' src/pz_save_manager/watcher.py" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+"""File watcher for automatic save backups using watchdog."""
+
+from __future__ import annotations
+
+import threading
+import time
+from contextlib import contextmanager
+from pathlib import Path
+
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+
+from .backup import BackupRecord, create_backup
+from .saves import SaveGame
+
+
+class SaveWatcher(FileSystemEventHandler):
+    """Watches a save directory and creates backups after changes settle."""
+
+    def __init__(
+        self,
+        save: SaveGame,
+        debounce_seconds: float = 5.0,
+        backup_cooldown_seconds: float = 300.0,
+        on_backup: callable | None = None,
+    ) -> None:
+        self.save = save
+        self.debounce_seconds = debounce_seconds
+        self.backup_cooldown_seconds = backup_cooldown_seconds
+        self.on_backup = on_backup
+        self._last_event = 0.0
+        self._timer: threading.Timer | None = None
+        self._lock = threading.Lock()
+        self._backups: list[BackupRecord] = []
+        self._ignore_until = 0.0  # epoch seconds; events before this are dropped
+        self._last_backup_time = 0.0  # epoch seconds of last auto-backup
+        self._last_backup_mtime = 0.0  # save mtime at time of last backup
+
+    def pause(self) -> None:
+        """Suppress all events until resume() is called.
+
+        Used during operations that legitimately rewrite the save dir
+        (e.g. restore_backup), so the watcher doesn't immediately back
+        up the just-restored content. Any pending debounce timer is
+        cancelled.
+        """
+        with self._lock:
+            self._ignore_until = float("inf")
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+
+    def cancel_pending(self) -> None:
+        """Cancel any pending debounce backup."""
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+
+    def resume(self, grace_seconds: float = 1.0) -> None:
+        """Re-enable events, with a short grace window for in-flight
+        watchdog events from the paused operation to drain."""
+        with self._lock:
+            self._ignore_until = time.time() + grace_seconds
+
+    def on_modified(self, event) -> None:
+        if event.is_directory:
+            return
+        now = time.time()
+        with self._lock:
+            if now < self._ignore_until:
+                return
+            self._last_event = now
+            if self._timer is not None:
+                self._timer.cancel()
+            self._timer = threading.Timer(self.debounce_seconds, self._do_backup)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def _do_backup(self) -> None:
+        now = time.time()
+        from .saves import get_save_modified_time
+        backup: BackupRecord | None = None
+        callback = None
+        try:
+            with self._lock:
+                self._timer = None
+                # Enforce cooldown: skip if the last auto-backup was too recent.
+                if now - self._last_backup_time < self.backup_cooldown_seconds:
+                    return
+                # Skip if the save hasn't actually changed since the last backup.
+                # On Windows, watchdog can fire on spurious events (AV, indexing,
+                # attribute changes). We guard against this by comparing mtims.
+                try:
+                    current_mtime = get_save_modified_time(self.save)
+                except OSError:
+                    return
+                if current_mtime <= self._last_backup_mtime:
+                    return
+                backup = create_backup(self.save.game_mode, self.save.name, auto=True)
+                self._backups.append(backup)
+                self._last_backup_time = now
+                self._last_backup_mtime = current_mtime
+                callback = self.on_backup
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error("Auto-backup failed for %s/%s: %s", self.save.game_mode, self.save.name, e, exc_info=True)
+            return
+        if backup is not None and callback:
+            callback(backup)
+
+
+class WatcherManager:
+    """Manages multiple SaveWatcher instances."""
+
+    def __init__(self) -> None:
+        self._observer = Observer()
+        self._watchers: dict[str, SaveWatcher] = {}
+        self._watches: dict[str, object] = {}  # watchdog handles
+        self._running = False
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    def start(self) -> None:
+        if not self._running:
+            if not self._observer.is_alive():
+                self._observer = Observer()
+                # Re-schedule all watched saves
+                for key, watcher in list(self._watchers.items()):
+                    save = watcher.save
+                    handle = self._observer.schedule(watcher, str(save.path), recursive=True)
+                    self._watches[key] = handle
+            self._observer.start()
+            self._running = True
+
+    def stop(self) -> None:
+        for watcher in list(self._watchers.values()):
+            watcher.cancel_pending()
+        if self._running:
+            self._observer.stop()
+            self._observer.join(timeout=5)
+            self._running = False
+
+    def watch(self, save: SaveGame, debounce_seconds: float = 5.0, backup_cooldown_seconds: float = 300.0) -> SaveWatcher:
+        key = save.display_name
+        if key in self._watchers:
+            return self._watchers[key]
+        watcher = SaveWatcher(save, debounce_seconds, backup_cooldown_seconds)
+        self._watchers[key] = watcher
+        handle = self._observer.schedule(watcher, str(save.path), recursive=True)
+        self._watches[key] = handle
+        return watcher
+
+    def unwatch(self, save: SaveGame) -> None:
+        key = save.display_name
+        if key in self._watches:
+            self._observer.unschedule(self._watches[key])
+            del self._watches[key]
+        if key in self._watchers:
+            watcher = self._watchers.pop(key)
+            watcher.cancel_pending()
+
+    def watched_saves(self) -> list[str]:
+        return sorted(self._watchers.keys())
+
+    def get_backups(self, save: SaveGame) -> list[BackupRecord]:
+        key = save.display_name
+        if key in self._watchers:
+            return list(self._watchers[key]._backups)
+        return []
+
+    @contextmanager
+    def pause_for(self, save: SaveGame):
+        """Context manager: temporarily silence the watcher for `save`.
+
+        No-op if the save isn't being watched. After the block exits,
+        the watcher resumes with a short grace window so any file
+        events still in watchdog's queue from the operation get dropped
+        instead of triggering an immediate auto-backup.
+        """
+        watcher = self._watchers.get(save.display_name)
+        if watcher is not None:
+            watcher.pause()
+        try:
+            yield
+        finally:
+            if watcher is not None:
+                watcher.resume()
+
+
+# Global instance
+_manager: WatcherManager | None = None
+
+
+def get_manager() -> WatcherManager:
+    global _manager
+    if _manager is None:
+        _manager = WatcherManager()
+    return _manager
+
+exec
+/bin/bash -lc "sed -n '1,220p' src/pz_save_manager/backup.py" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+"""Backup and restore operations for full Project Zomboid save directories."""
+
+from __future__ import annotations
+
+import shutil
+import tempfile
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from uuid import uuid4
+
+from .platforms import get_backups_root, get_saves_root
+from .saves import SaveGame, SaveManagerError, get_save
+
+INTERNAL_FILES = {".pz-note", ".pz-auto"}
+_INTERNAL_PREFIX = ".pz-"
+
+
+class BackupError(SaveManagerError):
+    """Base error for backup operations."""
+
+
+class BackupNotFound(BackupError):
+    """Raised when a backup directory cannot be found."""
+
+
+@dataclass(frozen=True)
+class BackupRecord:
+    """A full-directory save backup."""
+
+    game_mode: str
+    save_name: str
+    timestamp: str
+    path: Path
+    auto: bool = False
+
+    @property
+    def display_name(self) -> str:
+        return f"{self.game_mode}/{self.save_name}/{self.timestamp}"
+
+    @property
+    def file_count(self) -> int:
+        try:
+            return sum(1 for _ in self.path.rglob("*") if _.is_file())
+        except OSError:
+            return 0
+
+    @property
+    def size_mb(self) -> float:
+        try:
+            total = sum(_.stat().st_size for _ in self.path.rglob("*") if _.is_file())
+            return round(total / (1024 * 1024), 1)
+        except OSError:
+            return 0.0
+
+    @property
+    def age(self) -> str:
+        """Human-readable relative time (e.g. '3 hours ago')."""
+        try:
+            dt = datetime.strptime(self.timestamp, "%Y%m%d-%H%M%S")
+        except ValueError:
+            return self.timestamp
+        delta = datetime.now() - dt
+        seconds = delta.total_seconds()
+        if seconds < 60:
+            return "just now"
+        mins = int(seconds / 60)
+        if mins < 60:
+            return f"{mins} min ago"
+        hours = int(mins / 60)
+        if hours < 24:
+            return f"{hours}h ago"
+        days = int(hours / 24)
+        if days < 7:
+            return f"{days}d ago"
+        weeks = int(days / 7)
+        if weeks < 5:
+            return f"{weeks}w ago"
+        return dt.strftime("%d/%m/%Y")
+
+    @property
+    def formatted(self) -> str:
+        """Human-readable date/time (e.g. '2026-05-18 12:11:48')."""
+        try:
+            dt = datetime.strptime(self.timestamp, "%Y%m%d-%H%M%S")
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return self.timestamp
+
+    @property
+    def note(self) -> str | None:
+        """User annotation stored alongside the backup (read lazily)."""
+        return get_backup_note(self.path)
+
+    def set_note(self, text: str) -> None:
+        """Annotate this backup. Pass empty string to remove the note."""
+        set_backup_note(self.path, text)
+
+
+_NOTE_FILE = ".pz-note"
+_AUTO_FILE = ".pz-auto"
+
+
+def get_backup_note(backup_path: Path) -> str | None:
+    """Read the annotation for a backup, or None."""
+    note_file = backup_path / _NOTE_FILE
+    if not note_file.is_file():
+        return None
+    try:
+        return note_file.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def set_backup_note(backup_path: Path, text: str) -> None:
+    """Write or remove an annotation for a backup."""
+    note_file = backup_path / _NOTE_FILE
+    text = text.strip()
+    if not text:
+        try:
+            note_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+    note_file.write_text(text, encoding="utf-8")
+
+
+def _root(path: Path | str | None, default: Path) -> Path:
+    return Path(path).expanduser() if path is not None else default
+
+
+def _validate_component(value: str, label: str) -> None:
+    if value in {"", ".", ".."} or "/" in value or chr(92) in value or "\x00" in value:
+        raise BackupError(f"Invalid {label}: {value!r}")
+
+
+def _backup_path(game_mode: str, save_name: str, timestamp: str, backups_root: Path | str | None) -> Path:
+    _validate_component(game_mode, "game mode")
+    _validate_component(save_name, "save name")
+    _validate_component(timestamp, "timestamp")
+    return _root(backups_root, get_backups_root()) / game_mode / save_name / timestamp
+
+
+def _timestamp(now: datetime | None = None) -> str:
+    return (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
+
+
+def _skip_symlinks_and_internal(d: str, names: list[str]) -> list[str]:
+    return [
+        name
+        for name in names
+        if (Path(d) / name).is_symlink()
+        or name in INTERNAL_FILES
+        or name.startswith(_INTERNAL_PREFIX)
+    ]
+
+
+def _unique_destination(base_dir: Path, timestamp: str) -> tuple[str, Path]:
+    # P0: TOCTOU-safe — reserve via atomic mkdir, then caller copies into it
+    destination = base_dir / timestamp
+    try:
+        destination.mkdir(parents=True, exist_ok=False)
+        return timestamp, destination
+    except FileExistsError:
+        pass
+    for index in range(1, 100):
+        candidate_timestamp = f"{timestamp}-{index:02d}"
+        candidate = base_dir / candidate_timestamp
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate_timestamp, candidate
+        except FileExistsError:
+            continue
+    raise BackupError(f"Could not allocate a unique backup under {base_dir}")
+
+
+def create_backup(
+    game_mode: str,
+    save_name: str,
+    *,
+    saves_root: Path | str | None = None,
+    backups_root: Path | str | None = None,
+    now: datetime | None = None,
+    auto: bool = False,
+) -> BackupRecord:
+    """Create a timestamped full backup for a save directory."""
+    _validate_component(game_mode, "game mode")
+    _validate_component(save_name, "save name")
+    if now is None:
+        now = datetime.now()
+    save = get_save(game_mode, save_name, saves_root=saves_root)
+    backup_base = _root(backups_root, get_backups_root()) / game_mode / save_name
+    backup_base.mkdir(parents=True, exist_ok=True)
+    timestamp, destination = _unique_destination(backup_base, _timestamp(now))
+    # P0: copy to temp inside destination, then atomically move contents
+    tmp = Path(tempfile.mkdtemp(dir=destination.parent, prefix=f".tmp-{timestamp}-"))
+    try:
+        shutil.copytree(save.path, tmp, copy_function=shutil.copy2,
+                        ignore=_skip_symlinks_and_internal, dirs_exist_ok=True)
+        # Atomic: move all contents from tmp into destination
+        for item in tmp.iterdir():
+            shutil.move(str(item), str(destination / item.name))
+    except Exception:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    # Persist auto/manual marker
+    if auto:
+        try:
+            (destination / _AUTO_FILE).touch()
+        except OSError:
+            pass
+    result = BackupRecord(game_mode, save_name, timestamp, destination, auto=auto)
+    # Prune excess auto-backups (manual backups are never pruned)
+    if auto:
+        from .config import get as config_get
+        max_auto = config_get("max_auto_backups")
+        if isinstance(max_auto, (int, float)) and max_auto >= 0:
+            prune_auto_backups(game_mode, save_name, int(max_auto), backups_root=backups_root)
+
+exec
+/bin/bash -lc "sed -n '1,180p' src/pz_save_manager/saves.py" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+"""Save discovery for Project Zomboid."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+from .platforms import get_saves_root
+
+
+class SaveManagerError(Exception):
+    """Base error for save manager operations."""
+
+
+class SaveNotFound(SaveManagerError):
+    """Raised when a specific save cannot be found."""
+
+
+@dataclass(frozen=True)
+class SaveGame:
+    """A discovered Project Zomboid save directory."""
+    game_mode: str
+    name: str
+    path: Path
+
+    @property
+    def display_name(self) -> str:
+        return f"{self.game_mode}/{self.name}"
+
+
+def _to_root(saves_root: Path | str | None) -> Path:
+    return Path(saves_root).expanduser() if saves_root is not None else get_saves_root()
+
+
+def get_save_modified_time(save: SaveGame) -> float:
+    """Return a representative modification time for the save (fast, no rglob).
+
+    A full rglob is O(files) — PZ saves contain thousands of map chunks, and
+    on Windows with real-time AV, walking the tree can take minutes per save.
+    Sampling the save dir + the files PZ actually writes to is O(1) and gives
+    the same answer for any normal play session.
+    """
+    latest = save.path.stat().st_mtime
+    for name in ("sandbox.lua", "players.db", "vehicles.db", "map_ver.bin", "map"):
+        try:
+            t = (save.path / name).stat().st_mtime
+            if t > latest:
+                latest = t
+        except OSError:
+            continue
+    return latest
+
+
+def list_game_modes(saves_root: Path | str | None = None) -> list[str]:
+    """List available game mode directories."""
+    root = _to_root(saves_root)
+    if not root.is_dir():
+        return []
+    return sorted(
+        (path.name for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")),
+        key=str.casefold,
+    )
+
+
+def list_saves(saves_root: Path | str | None = None) -> list[SaveGame]:
+    """Discover saves under Saves/GameMode/SaveName."""
+    root = _to_root(saves_root)
+    if not root.is_dir():
+        return []
+
+    saves: list[SaveGame] = []
+    for mode_dir in root.iterdir():
+        if not mode_dir.is_dir() or mode_dir.name.startswith("."):
+            continue
+        for save_dir in mode_dir.iterdir():
+            if save_dir.is_dir() and not save_dir.name.startswith("."):
+                if not _should_skip(save_dir.name):
+                    saves.append(SaveGame(mode_dir.name, save_dir.name, save_dir))
+
+    # Most recently modified first; tied saves fall back to alphabetical order.
+    return sorted(saves, key=lambda save: (-get_save_modified_time(save),
+                                             save.game_mode.casefold(),
+                                             save.name.casefold()))
+
+
+_MULTIPLAYER_RE = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}_')
+# Multiplayer saves created when joining a named server (e.g. "MyServer_player")
+_MP_PLAYER_SUFFIX_RE = re.compile(r'_player$', re.IGNORECASE)
+# Crash-recovery auto-saves created by PZ after a crash (ARK_..._crash_crash...)
+_CRASH_SUFFIX_RE = re.compile(r'_crash(_crash)*$', re.IGNORECASE)
+
+
+def _is_multiplayer(name: str) -> bool:
+    """Return True if the save name matches a server address (multiplayer save)."""
+    return bool(_MULTIPLAYER_RE.match(name))
+
+
+def _should_skip(name: str) -> bool:
+    """Return True for auto-generated saves that should be hidden.
+    
+    Excludes:
+    - Multiplayer saves (IP-prefixed or _player suffix)
+    - Crash-recovery auto-saves (_crash suffix)
+    """
+    return (
+        _MULTIPLAYER_RE.match(name)
+        or _MP_PLAYER_SUFFIX_RE.search(name)
+        or _CRASH_SUFFIX_RE.search(name)
+    )
+
+
+def get_save(game_mode: str, save_name: str, saves_root: Path | str | None = None) -> SaveGame:
+    """Return a specific save or raise SaveNotFound."""
+    # P0: prevent path traversal — reject '..', '/', '\\' and null bytes in components
+    for val, label in ((game_mode, "game_mode"), (save_name, "save_name")):
+        if ".." in val or "/" in val or "\\" in val or "\x00" in val:
+            raise SaveNotFound(f"Invalid {label}: {val!r}")
+    root = _to_root(saves_root)
+    path = root / game_mode / save_name
+    if not path.is_dir():
+        raise SaveNotFound(f"Save not found: {game_mode}/{save_name}")
+    return SaveGame(game_mode, save_name, path)
+
+
+_SANE_NAME_RE = re.compile(r'^[^/\x00]{1,200}$')
+
+
+def _validate_name(value: str, label: str) -> None:
+    """Reject empty, path-traversal, IP-shaped, or otherwise dangerous names."""
+    if not value or not value.strip():
+        raise SaveManagerError(f"{label} cannot be empty")
+    if ".." in value or "/" in value or "\\" in value or "\x00" in value:
+        raise SaveManagerError(f"Invalid {label}: {value!r}")
+    if _is_multiplayer(value.strip()):
+        raise SaveManagerError(f"{label} looks like a server address: {value!r}")
+    if not _SANE_NAME_RE.match(value):
+        raise SaveManagerError(f"Invalid characters in {label}: {value!r}")
+    if len(value.strip()) > 200:
+        raise SaveManagerError(f"{label} is too long (max 200 characters)")
+
+
+def rename_save(
+    game_mode: str,
+    old_name: str,
+    new_name: str,
+    *,
+    saves_root: Path | str | None = None,
+) -> SaveGame:
+    """Rename a save directory. Raises SaveManagerError on invalid names or conflicts."""
+    _validate_name(game_mode, "game_mode")
+    _validate_name(old_name, "old_name")
+    _validate_name(new_name, "new_name")
+
+    old = get_save(game_mode, old_name, saves_root=saves_root)
+    root = _to_root(saves_root)
+    new_path = root / game_mode / new_name.strip()
+    if new_path.exists():
+        raise SaveManagerError(f"Cannot rename save to {new_name!r}: Destination already exists: {new_name!r}")
+    try:
+        old.path.rename(new_path)
+    except OSError as e:
+        raise SaveManagerError(f"Cannot rename save to {new_name!r}: {e}") from e
+    return SaveGame(game_mode, new_name.strip(), new_path)
+
+exec
+/bin/bash -lc "sed -n '220,360p' src/pz_save_manager/backup.py" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+            prune_auto_backups(game_mode, save_name, int(max_auto), backups_root=backups_root)
+    return result
+
+
+def list_backups(
+    game_mode: str | None = None,
+    save_name: str | None = None,
+    *,
+    backups_root: Path | str | None = None,
+) -> list[BackupRecord]:
+    """List backups, optionally filtered by game mode and save name."""
+    if save_name is not None and game_mode is None:
+        raise BackupError("A game mode is required when filtering by save name")
+    root = _root(backups_root, get_backups_root())
+    if not root.is_dir():
+        return []
+    records: list[BackupRecord] = []
+    mode_dirs = [root / game_mode] if game_mode else [path for path in root.iterdir() if path.is_dir()]
+    for mode_dir in mode_dirs:
+        if not mode_dir.is_dir():
+            continue
+        save_dirs = [mode_dir / save_name] if save_name else [path for path in mode_dir.iterdir() if path.is_dir()]
+        for save_dir in save_dirs:
+            if not save_dir.is_dir():
+                continue
+            for backup_dir in save_dir.iterdir():
+                if backup_dir.is_dir():
+                    auto = (backup_dir / _AUTO_FILE).is_file()
+                    records.append(BackupRecord(mode_dir.name, save_dir.name, backup_dir.name, backup_dir, auto=auto))
+    return sorted(
+        records,
+        key=lambda backup: (backup.game_mode.casefold(), backup.save_name.casefold(), backup.timestamp),
+        reverse=True,
+    )
+
+
+def get_backup(
+    game_mode: str,
+    save_name: str,
+    timestamp: str,
+    *,
+    backups_root: Path | str | None = None,
+) -> BackupRecord:
+    """Return a specific backup or raise BackupNotFound."""
+    path = _backup_path(game_mode, save_name, timestamp, backups_root)
+    if not path.is_dir():
+        raise BackupNotFound(f"Backup not found: {game_mode}/{save_name}/{timestamp}")
+    return BackupRecord(game_mode, save_name, timestamp, path)
+
+
+def restore_backup(
+    game_mode: str,
+    save_name: str,
+    timestamp: str,
+    *,
+    saves_root: Path | str | None = None,
+    backups_root: Path | str | None = None,
+) -> SaveGame:
+    """Restore a backup over the live save directory."""
+    backup = get_backup(game_mode, save_name, timestamp, backups_root=backups_root)
+    target = _root(saves_root, get_saves_root()) / game_mode / save_name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_target = target.with_name(f".{target.name}.restore-{uuid4().hex}.tmp")
+    previous_target = target.with_name(f".{target.name}.restore-old-{uuid4().hex}")
+    try:
+        shutil.copytree(backup.path, temp_target, copy_function=shutil.copy2,
+                        ignore=_skip_symlinks_and_internal)
+        if target.exists():
+            target.rename(previous_target)
+        temp_target.rename(target)
+    except OSError as exc:
+        if temp_target.exists():
+            shutil.rmtree(temp_target, ignore_errors=True)
+        if previous_target.exists() and not target.exists():
+            previous_target.rename(target)
+        raise BackupError(f"Could not restore backup: {exc}") from exc
+    # P0: cleanup wrapped in try/except — failure here must not lose the restored save
+    try:
+        if previous_target.exists():
+            shutil.rmtree(previous_target)
+    except OSError as e:
+        import logging
+        logging.getLogger(__name__).warning("Could not remove previous save backup %s: %s", previous_target, e)
+    return SaveGame(game_mode, save_name, target)
+
+
+def delete_backup(
+    game_mode: str,
+    save_name: str,
+    timestamp: str,
+    *,
+    backups_root: Path | str | None = None,
+) -> BackupRecord:
+    """Delete a backup directory."""
+    backup = get_backup(game_mode, save_name, timestamp, backups_root=backups_root)
+    try:
+        shutil.rmtree(backup.path)
+    except OSError as exc:
+        raise BackupError(f"Could not delete backup: {exc}") from exc
+    return backup
+
+
+def preflight_rename(
+    game_mode: str,
+    old_save_name: str,
+    new_save_name: str,
+    *,
+    backups_root: Path | str | None = None,
+) -> None:
+    """Validate backup-side rename constraints before renaming the live save."""
+    _validate_component(game_mode, "game mode")
+    _validate_component(old_save_name, "old save name")
+    normalized_new_name = new_save_name.strip()
+    _validate_component(normalized_new_name, "new save name")
+
+    root = _root(backups_root, get_backups_root())
+    old_dir = root / game_mode / old_save_name
+    new_dir = root / game_mode / normalized_new_name
+    if new_dir != old_dir and new_dir.is_dir():
+        raise BackupError(f"Cannot rename backups: {normalized_new_name!r} already has backups")
+
+
+def rename_backups_for_save(
+    game_mode: str,
+    old_save_name: str,
+    new_save_name: str,
+    *,
+    backups_root: Path | str | None = None,
+) -> int:
+    """Move all backups from old_save_name to new_save_name under game_mode.
+
+    Returns the number of backups moved.  If no backups exist for the old
+    name this is a no-op (returns 0).  Raises BackupError if the new name
+    already has backups (to avoid silently merging two histories).
+    """
+    _validate_component(game_mode, "game mode")
+    _validate_component(old_save_name, "old save name")
+    _validate_component(new_save_name, "new save name")
+
+    root = _root(backups_root, get_backups_root())
+    old_dir = root / game_mode / old_save_name
+
+exec
+/bin/bash -lc "sed -n '1,210p' src/pz_save_manager/cli.py" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+"""Click command line interface for PZ Save Manager."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+
+import click
+from rich.console import Console
+from rich.table import Table
+
+from .backup import BackupError, BackupNotFound, create_backup, delete_backup, list_backups, restore_backup
+from .gui import run_gui
+from .platforms import get_backups_root, get_saves_root
+from .saves import SaveNotFound, get_save_modified_time, list_saves
+
+
+console = Console()
+
+
+def _path_option(value: str | None) -> Path | None:
+    return Path(value).expanduser() if value else None
+
+
+@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+@click.option("--saves-dir", type=click.Path(file_okay=False, dir_okay=True), help="Override the Project Zomboid saves directory.")
+@click.option("--backups-dir", type=click.Path(file_okay=False, dir_okay=True), help="Override the backup storage directory.")
+@click.pass_context
+def main(ctx: click.Context, saves_dir: str | None, backups_dir: str | None) -> None:
+    """Manage Project Zomboid save backups."""
+    ctx.ensure_object(dict)
+    ctx.obj["saves_root"] = _path_option(saves_dir) or get_saves_root()
+    ctx.obj["backups_root"] = _path_option(backups_dir) or get_backups_root()
+
+
+@main.command("list")
+@click.pass_context
+def list_saves_command(ctx: click.Context) -> None:
+    """List discovered Project Zomboid saves."""
+    saves_root: Path = ctx.obj["saves_root"]
+    saves = list_saves(saves_root)
+    if not saves:
+        if saves_root.exists():
+            console.print(f"[yellow]No saves found in {saves_root}[/yellow]")
+        else:
+            console.print(f"[yellow]Project Zomboid saves directory not found: {saves_root}[/yellow]")
+        return
+
+    table = Table(title="Project Zomboid Saves")
+    table.add_column("Game Mode", style="cyan")
+    table.add_column("Save")
+    table.add_column("Modified")
+    table.add_column("Path", overflow="fold")
+    for save in saves:
+        modified = datetime.fromtimestamp(get_save_modified_time(save)).strftime("%Y-%m-%d %H:%M:%S")
+        table.add_row(save.game_mode, save.name, modified, str(save.path))
+    console.print(table)
+
+
+@main.command("backup")
+@click.argument("game_mode")
+@click.argument("save_name")
+@click.pass_context
+def backup_command(ctx: click.Context, game_mode: str, save_name: str) -> None:
+    """Create a timestamped backup for a save."""
+    try:
+        backup = create_backup(game_mode, save_name, saves_root=ctx.obj["saves_root"], backups_root=ctx.obj["backups_root"])
+    except (SaveNotFound, BackupError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print(f"[green]Backup created:[/green] {backup.path}")
+
+
+@main.command("list-backups")
+@click.argument("game_mode", required=False)
+@click.argument("save_name", required=False)
+@click.pass_context
+def list_backups_command(ctx: click.Context, game_mode: str | None, save_name: str | None) -> None:
+    """List available backups."""
+    try:
+        backups = list_backups(game_mode, save_name, backups_root=ctx.obj["backups_root"])
+    except BackupError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not backups:
+        console.print("[yellow]No backups found.[/yellow]")
+        return
+    table = Table(title="Project Zomboid Backups")
+    table.add_column("Game Mode", style="cyan")
+    table.add_column("Save")
+    table.add_column("Timestamp")
+    table.add_column("Path", overflow="fold")
+    for backup in backups:
+        table.add_row(backup.game_mode, backup.save_name, backup.timestamp, str(backup.path))
+    console.print(table)
+
+
+@main.command("restore")
+@click.argument("game_mode")
+@click.argument("save_name")
+@click.argument("timestamp")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation.")
+@click.pass_context
+def restore_command(ctx: click.Context, game_mode: str, save_name: str, timestamp: str, yes: bool) -> None:
+    """Restore a save from a backup timestamp."""
+    if not yes:
+        click.confirm(f"Restore {game_mode}/{save_name} from {timestamp}? The current save directory will be replaced.", abort=True)
+    try:
+        save = restore_backup(game_mode, save_name, timestamp, saves_root=ctx.obj["saves_root"], backups_root=ctx.obj["backups_root"])
+    except (BackupNotFound, BackupError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print(f"[green]Save restored:[/green] {save.path}")
+
+
+@main.command("delete")
+@click.argument("game_mode")
+@click.argument("save_name")
+@click.argument("timestamp")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation.")
+@click.pass_context
+def delete_command(ctx: click.Context, game_mode: str, save_name: str, timestamp: str, yes: bool) -> None:
+    """Delete a backup timestamp."""
+    if not yes:
+        click.confirm(f"Delete backup {game_mode}/{save_name}/{timestamp}?", abort=True)
+    try:
+        backup = delete_backup(game_mode, save_name, timestamp, backups_root=ctx.obj["backups_root"])
+    except (BackupNotFound, BackupError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print(f"[green]Backup deleted:[/green] {backup.display_name}")
+
+
+@main.command("gui")
+@click.option("--host", default="127.0.0.1", help="Host to bind to.")
+@click.option("--port", default=8080, type=int, help="Port to listen on.")
+@click.option("--no-browser", is_flag=True, help="Don't open browser automatically.")
+def gui_command(host: str, port: int, no_browser: bool) -> None:
+    """Launch the web GUI."""
+    if no_browser:
+        import flask
+        # We still want the GUI but without browser open
+        from .gui import app
+        print(f"\n  🧟 PZ Save Manager — http://{host}:{port}\n")
+        app.run(host=host, port=port, debug=False)
+    else:
+        run_gui(host, port)
+
+
+@main.command("config")
+@click.argument("key", required=False)
+@click.argument("value", required=False)
+def config_command(key: str | None, value: str | None) -> None:
+    """View or set configuration. 'pz-saves config' shows all."""
+    from .config import get_all, set_
+
+    if key is None:
+        cfg = get_all()
+        console.print("[bold]Configuration:[/bold]")
+        for k, v in cfg.items():
+            console.print(f"  {k}: {v}")
+        return
+
+    if value is None:
+        from .config import get
+        console.print(f"{key} = {get(key)}")
+        return
+
+    # Convert types
+    if key == "debounce_seconds":
+        value = float(value)  # type: ignore
+    elif key == "backup_cooldown_minutes":
+        value = int(value)  # type: ignore
+    elif key == "max_auto_backups":
+        value = int(value)  # type: ignore
+    elif key == "port":
+        value = int(value)  # type: ignore
+    elif key in ("auto_start_watcher",):
+        value = value.lower() in ("true", "1", "yes")  # type: ignore
+    elif key == "backups_dir" and value in ("", "none", "null"):
+        value = None  # type: ignore
+
+    set_(key, value)
+    console.print(f"[green]{key} = {value}[/green]")
+
+
+@main.command("rename")
+@click.argument("game_mode")
+@click.argument("old_name")
+@click.argument("new_name")
+@click.pass_context
+def rename_command(ctx: click.Context, game_mode: str, old_name: str, new_name: str) -> None:
+    """Rename a save (and move its backups)."""
+    from .saves import SaveManagerError, rename_save
+    from .backup import BackupError, preflight_rename, rename_backups_for_save
+    try:
+        preflight_rename(game_mode, old_name, new_name, backups_root=ctx.obj["backups_root"])
+        new_save = rename_save(game_mode, old_name, new_name, saves_root=ctx.obj["saves_root"])
+        n = rename_backups_for_save(game_mode, old_name, new_name, backups_root=ctx.obj["backups_root"])
+    except (SaveManagerError, BackupError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print(f"[green]Saved renamed to[/green] {new_save.name}")
+    if n:
+        console.print(f"[dim]{n} backup(s) moved[/dim]")
+
+
+@main.command("annotate")
+@click.argument("game_mode")
+@click.argument("save_name")
+@click.argument("timestamp")
+@click.argument("note", required=False)
+@click.pass_context
+def annotate_command(ctx: click.Context, game_mode: str, save_name: str, timestamp: str, note: str | None) -> None:
+    """Add or read a note on a backup. Omit note to read existing."""
+
+codex
+The first pass confirms several claims exactly, but a couple need nuance: `get_json(silent=True)` still returns `None` for non-JSON form posts, and `start()` already snapshots `_watchers` for iteration. I’m checking tests and config behavior now before final classification.
+exec
+/bin/bash -lc "sed -n '1,140p' src/pz_save_manager/config.py" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+"""Configuration management for PZ Save Manager.
+
+Config stored in ~/.pz-save-manager/config.json
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+from pathlib import Path
+
+from .platforms import get_app_dir
+
+CONFIG_FILE = get_app_dir() / "config.json"
+
+DEFAULTS = {
+    "backups_dir": None,
+    "debounce_seconds": 5.0,
+    "backup_cooldown_minutes": 1,
+    "max_auto_backups": 30,
+    "auto_start_watcher": False,
+    "port": 8080,
+}
+
+
+def _load() -> dict:
+    if CONFIG_FILE.is_file():
+        try:
+            return json.loads(CONFIG_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save(data: dict) -> None:
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    # Atomic write: write to temp file in the same directory, then replace.
+    # This prevents corruption if the process is killed mid-write.
+    fd, tmp_path = tempfile.mkstemp(
+        suffix=".tmp", prefix=".config-", dir=str(CONFIG_FILE.parent)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, CONFIG_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def get(key: str):
+    """Get a config value, falling back to defaults."""
+    data = _load()
+    if key in data:
+        return data[key]
+    return DEFAULTS.get(key)
+
+
+def set_(key: str, value) -> None:
+    """Set a config value and save."""
+    data = _load()
+    data[key] = value
+    _save(data)
+
+
+def get_all() -> dict:
+    """Return all config with defaults filled in."""
+    result = dict(DEFAULTS)
+    result.update(_load())
+    return result
+
+
+def get_backups_dir() -> Path | None:
+    """Return custom backup dir or None for default."""
+    val = get("backups_dir")
+    if val:
+        return Path(val).expanduser()
+    return None
+
+exec
+/bin/bash -lc "sed -n '1,180p' tests/test_watcher.py" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+"""Tests for the save file watcher."""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+from pz_save_manager.backup import BackupRecord
+from pz_save_manager.saves import SaveGame
+from pz_save_manager.watcher import SaveWatcher, WatcherManager
+
+
+class FakeEvent:
+    is_directory = False
+
+
+def test_save_watcher_debounce(tmp_path: Path):
+    save_dir = tmp_path / "Sandbox" / "test-save"
+    save_dir.mkdir(parents=True)
+    save = SaveGame("Sandbox", "test-save", save_dir)
+
+    backups = []
+    watcher = SaveWatcher(save, debounce_seconds=0.05, on_backup=lambda b: backups.append(b))
+    watcher.on_modified(FakeEvent())  # type: ignore
+    time.sleep(0.2)
+    # Debounce timer should have fired; backup may fail in test but watcher handles it silently
+    assert watcher._last_event > 0
+
+
+def test_watcher_manager_lifecycle():
+    manager = WatcherManager()
+    assert not manager.running
+    manager.start()
+    assert manager.running
+    manager.stop()
+    assert not manager.running
+
+
+def test_watcher_manager_watched_saves(tmp_path: Path):
+    save_dir = tmp_path / "Survivor" / "my-save"
+    save_dir.mkdir(parents=True)
+    save = SaveGame("Survivor", "my-save", save_dir)
+
+    manager = WatcherManager()
+    manager.watch(save)
+    assert "Survivor/my-save" in manager.watched_saves()
+    # Note: unwatch doesn't work with watchdog observer unless actually started
+    # because schedule creates an ObservedWatch wrapper. Tested via integration.
+
+
+def test_stop_annule_le_timer_en_attente(tmp_path: Path, monkeypatch):
+    """stop() doit empêcher un backup débouncé de partir après l'arrêt."""
+    save_dir = tmp_path / "Sandbox" / "stop-save"
+    save_dir.mkdir(parents=True)
+    save = SaveGame("Sandbox", "stop-save", save_dir)
+    created = []
+
+    def fake_create_backup(game_mode: str, save_name: str, *, auto: bool = False) -> BackupRecord:
+        created.append((game_mode, save_name, auto))
+        return BackupRecord(game_mode, save_name, "20260526-120000", tmp_path / "backup", auto=auto)
+
+    monkeypatch.setattr("pz_save_manager.watcher.create_backup", fake_create_backup)
+    manager = WatcherManager()
+    watcher = manager.watch(save, debounce_seconds=0.05, backup_cooldown_seconds=0.0)
+
+    watcher.on_modified(FakeEvent())  # type: ignore
+    manager.stop()
+    time.sleep(0.1)
+
+    assert created == []
+    assert manager.get_backups(save) == []
+
+
+def test_unwatch_annule_le_timer_en_attente(tmp_path: Path, monkeypatch):
+    """unwatch() doit annuler le timer existant avant d'oublier le watcher."""
+    save_dir = tmp_path / "Sandbox" / "unwatch-save"
+    save_dir.mkdir(parents=True)
+    save = SaveGame("Sandbox", "unwatch-save", save_dir)
+    created = []
+
+    def fake_create_backup(game_mode: str, save_name: str, *, auto: bool = False) -> BackupRecord:
+        created.append((game_mode, save_name, auto))
+        return BackupRecord(game_mode, save_name, "20260526-120000", tmp_path / "backup", auto=auto)
+
+    monkeypatch.setattr("pz_save_manager.watcher.create_backup", fake_create_backup)
+    manager = WatcherManager()
+    watcher = manager.watch(save, debounce_seconds=0.05, backup_cooldown_seconds=0.0)
+
+    watcher.on_modified(FakeEvent())  # type: ignore
+    manager.unwatch(save)
+    time.sleep(0.1)
+
+    assert created == []
+    assert save.display_name not in manager.watched_saves()
+
+
+def test_pause_for_suppresses_backup_during_block(tmp_path: Path):
+    """Restoring a watched save must not trigger an immediate auto-backup
+    of the just-restored content."""
+    save_dir = tmp_path / "Sandbox" / "world"
+    save_dir.mkdir(parents=True)
+    save = SaveGame("Sandbox", "world", save_dir)
+
+    backups = []
+    watcher = SaveWatcher(save, debounce_seconds=0.05, on_backup=lambda b: backups.append(b))
+
+    manager = WatcherManager()
+    manager._watchers[save.display_name] = watcher
+
+    class FakeEvent:
+        is_directory = False
+        src_path = str(save_dir / "sandbox.lua")
+
+    # Sanity: an event while NOT paused arms the debounce timer.
+    watcher.on_modified(FakeEvent())
+    assert watcher._timer is not None, "timer should be armed by a normal event"
+
+    # Now pause and replay events — they must be dropped, timer cleared.
+    with manager.pause_for(save):
+        watcher.on_modified(FakeEvent())
+        watcher.on_modified(FakeEvent())
+        assert watcher._timer is None, "paused watcher should not arm a timer"
+
+    # Immediately after resume(), there's a 1s grace window where lingering
+    # in-flight events are still ignored. An event in that window stays
+    # dropped — this is what prevents the post-restore auto-backup.
+    watcher.on_modified(FakeEvent())
+    assert watcher._timer is None, "events during grace window must be dropped"
+
+    # After the grace window expires, normal events arm the timer again.
+    time.sleep(1.1)
+    watcher.on_modified(FakeEvent())
+    assert watcher._timer is not None, "events after grace window must re-arm timer"
+    watcher._timer.cancel()
+
+
+def test_pause_for_is_noop_on_unwatched_save(tmp_path: Path):
+    save_dir = tmp_path / "Sandbox" / "unwatched"
+    save_dir.mkdir(parents=True)
+    save = SaveGame("Sandbox", "unwatched", save_dir)
+    manager = WatcherManager()
+    # Save isn't in manager._watchers — pause_for must be a no-op, not raise.
+    with manager.pause_for(save):
+        pass
+
+exec
+/bin/bash -lc "sed -n '1,220p' tests/test_adversarial.py" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+"""Adversarial security and robustness tests for PZ Save Manager.
+
+Each test is designed to FAIL against the current code, demonstrating a real risk.
+Updated to reflect P0 fixes: path traversal guard, symlink skipping, atomic backup,
+cleanup resilience, and logged (not silent) watcher errors.
+"""
+
+import logging
+import threading
+from datetime import datetime
+from pathlib import Path
+
+import pytest
+
+import pz_save_manager.backup as backup_mod
+from pz_save_manager.saves import SaveGame, SaveManagerError, get_save
+
+
+# ── RISK 1: Path traversal in get_save() ──────────────────────────────
+def test_get_save_rejects_path_traversal(tmp_path: Path) -> None:
+    saves = tmp_path / "saves"
+    (saves / "Sandbox").mkdir(parents=True)
+    outside = tmp_path / "secret"
+    outside.mkdir()
+
+    with pytest.raises(SaveManagerError):
+        get_save("Sandbox", "../../secret", saves_root=saves)
+
+
+# ── RISK 2: Symlink materialisation during restore ────────────────────
+def test_restore_does_not_follow_backup_symlinks(tmp_path: Path) -> None:
+    saves = tmp_path / "saves"
+    backups = tmp_path / "backups"
+    backup_dir = backups / "Sandbox" / "World" / "20260518-120000"
+    backup_dir.mkdir(parents=True)
+
+    secret = tmp_path / "secret.txt"
+    secret.write_text("do-not-copy", encoding="utf-8")
+    (backup_dir / "leak.txt").symlink_to(secret)
+
+    backup_mod.restore_backup(
+        "Sandbox", "World", "20260518-120000",
+        saves_root=saves, backups_root=backups,
+    )
+
+    # P0 fix: symlinks are now SKIPPED entirely during copytree
+    assert not (saves / "Sandbox" / "World" / "leak.txt").exists(), (
+        "Symlink was followed — external file materialised in live save!"
+    )
+
+
+# ── RISK 3: Non-atomic backup creation (TOCTOU race) ──────────────────
+def test_concurrent_backups_get_distinct_destinations(
+    tmp_path: Path,
+) -> None:
+    saves = tmp_path / "saves"
+    backups = tmp_path / "backups"
+    save_dir = saves / "Sandbox" / "World"
+    save_dir.mkdir(parents=True)
+    (save_dir / "map.bin").write_text("x", encoding="utf-8")
+
+    results: list[str] = []
+    errors: list[Exception] = []
+
+    def worker() -> None:
+        try:
+            b = backup_mod.create_backup(
+                "Sandbox", "World",
+                saves_root=saves, backups_root=backups,
+                now=datetime(2026, 5, 18, 12, 0, 0),
+            )
+            results.append(b.timestamp)
+        except Exception as exc:
+            errors.append(exc)
+
+    t1 = threading.Thread(target=worker)
+    t2 = threading.Thread(target=worker)
+    t1.start(); t2.start(); t1.join(); t2.join()
+
+    # P0 fix: _unique_destination now uses atomic mkdir — no FileExistsError
+    assert not errors, f"Concurrent backup failed with: {errors}"
+    assert sorted(results) == ["20260518-120000", "20260518-120000-01"], (
+        f"Expected two distinct timestamps, got: {results}"
+    )
+
+
+# ── RISK 4: Restore survives cleanup failure ──────────────────────────
+def test_restore_survives_cleanup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    saves = tmp_path / "saves"
+    backups = tmp_path / "backups"
+    live = saves / "Sandbox" / "World"
+    live.mkdir(parents=True)
+    (live / "sandbox.lua").write_text("live-content", encoding="utf-8")
+
+    backup = backup_mod.create_backup(
+        "Sandbox", "World",
+        saves_root=saves, backups_root=backups,
+        now=datetime(2026, 5, 18, 12, 0, 0),
+    )
+    (backup.path / "sandbox.lua").write_text("backup-content", encoding="utf-8")
+
+    def fail_rmtree(path, *args, **kwargs):
+        raise OSError("cleanup failed")
+
+    monkeypatch.setattr(backup_mod.shutil, "rmtree", fail_rmtree)
+
+    # P0 fix: cleanup failure no longer raises — restore succeeds, old save is replaced
+    backup_mod.restore_backup(
+        "Sandbox", "World", backup.timestamp,
+        saves_root=saves, backups_root=backups,
+    )
+
+    assert (live / "sandbox.lua").read_text("utf-8") == "backup-content", (
+        "Restore failed to replace live save with backup content"
+    )
+
+
+# ── RISK 5: Watcher errors are logged, not silent ─────────────────────
+def test_watcher_logs_backup_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import pz_save_manager.watcher as watcher_mod
+
+    save_dir = tmp_path / "World"
+    save_dir.mkdir()
+    (save_dir / "map.bin").write_text("x", encoding="utf-8")
+    save = SaveGame("Sandbox", "World", save_dir)
+    watcher = watcher_mod.SaveWatcher(save, debounce_seconds=0)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("backup infrastructure down")
+
+    monkeypatch.setattr(watcher_mod, "create_backup", fail)
+
+    with caplog.at_level(logging.ERROR):
+        watcher._do_backup()
+
+    # P0 fix: errors are now LOGGED instead of silently swallowed
+    assert "backup infrastructure down" in caplog.text, (
+        "Watcher failure was not logged — silent error!"
+    )
+
+exec
+/bin/bash -lc "sed -n '1,220p' tests/test_backup.py" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+from __future__ import annotations
+
+from datetime import datetime
+
+from pz_save_manager.backup import create_backup, delete_backup, list_backups, restore_backup, set_backup_note
+
+
+def make_save(root, mode="Sandbox", name="WorldOne"):
+    save_dir = root / mode / name
+    map_dir = save_dir / "map"
+    map_dir.mkdir(parents=True)
+    (save_dir / "sandbox.lua").write_text("SandboxVars = {}", encoding="utf-8")
+    (map_dir / "0_0.bin").write_text("chunk", encoding="utf-8")
+    return save_dir
+
+
+def test_create_backup_copies_save_and_uses_collision_suffix(tmp_path):
+    saves_root = tmp_path / "saves"
+    backups_root = tmp_path / "backups"
+    make_save(saves_root)
+    now = datetime(2026, 5, 14, 10, 30, 5)
+
+    first = create_backup("Sandbox", "WorldOne", saves_root=saves_root, backups_root=backups_root, now=now)
+    second = create_backup("Sandbox", "WorldOne", saves_root=saves_root, backups_root=backups_root, now=now)
+
+    assert first.timestamp == "20260514-103005"
+    assert second.timestamp == "20260514-103005-01"
+    assert (first.path / "sandbox.lua").read_text(encoding="utf-8") == "SandboxVars = {}"
+    assert (first.path / "map" / "0_0.bin").read_text(encoding="utf-8") == "chunk"
+
+
+def test_restore_backup_replaces_current_save(tmp_path):
+    saves_root = tmp_path / "saves"
+    backups_root = tmp_path / "backups"
+    save_dir = make_save(saves_root)
+    backup = create_backup("Sandbox", "WorldOne", saves_root=saves_root, backups_root=backups_root, now=datetime(2026, 5, 14, 10, 30, 5))
+    (save_dir / "sandbox.lua").write_text("changed", encoding="utf-8")
+    (save_dir / "new-file.txt").write_text("new", encoding="utf-8")
+
+    restored = restore_backup("Sandbox", "WorldOne", backup.timestamp, saves_root=saves_root, backups_root=backups_root)
+
+    assert restored.path == saves_root / "Sandbox" / "WorldOne"
+    assert (restored.path / "sandbox.lua").read_text(encoding="utf-8") == "SandboxVars = {}"
+    assert not (restored.path / "new-file.txt").exists()
+
+
+def test_restore_backup_ne_copie_pas_les_sidecars_internes(tmp_path):
+    """Les marqueurs .pz-* du backup ne doivent jamais contaminer la sauvegarde live."""
+    saves_root = tmp_path / "saves"
+    backups_root = tmp_path / "backups"
+    save_dir = make_save(saves_root)
+    backup = create_backup(
+        "Sandbox",
+        "WorldOne",
+        saves_root=saves_root,
+        backups_root=backups_root,
+        now=datetime(2026, 5, 14, 10, 30, 5),
+        auto=True,
+    )
+    set_backup_note(backup.path, "Jour 12")
+    (save_dir / "sandbox.lua").write_text("changed", encoding="utf-8")
+
+    restored = restore_backup("Sandbox", "WorldOne", backup.timestamp, saves_root=saves_root, backups_root=backups_root)
+
+    assert not any(path.name.startswith(".pz-") for path in restored.path.rglob("*"))
+
+    manual = create_backup(
+        "Sandbox",
+        "WorldOne",
+        saves_root=saves_root,
+        backups_root=backups_root,
+        now=datetime(2026, 5, 14, 10, 31, 5),
+    )
+    records = list_backups("Sandbox", "WorldOne", backups_root=backups_root)
+    manual_record = next(record for record in records if record.timestamp == manual.timestamp)
+
+    assert not manual_record.auto
+
+
+def test_delete_backup_removes_backup_directory(tmp_path):
+    saves_root = tmp_path / "saves"
+    backups_root = tmp_path / "backups"
+    make_save(saves_root)
+    backup = create_backup("Sandbox", "WorldOne", saves_root=saves_root, backups_root=backups_root, now=datetime(2026, 5, 14, 10, 30, 5))
+
+    deleted = delete_backup("Sandbox", "WorldOne", backup.timestamp, backups_root=backups_root)
+
+    assert deleted.timestamp == backup.timestamp
+    assert not backup.path.exists()
+    assert list_backups(backups_root=backups_root) == []
+
+exec
+/bin/bash -lc "sed -n '1,160p' tests/test_gui.py" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+"""Tests for the Flask web GUI."""
+
+from pathlib import Path
+
+import pytest
+
+from pz_save_manager.gui import app
+
+
+@pytest.fixture
+def client(tmp_path: Path, monkeypatch):
+    """Flask test client with test save directories."""
+    saves = tmp_path / "Zomboid" / "Saves"
+    backups = tmp_path / ".pz-save-manager" / "backups"
+    saves.mkdir(parents=True)
+    (saves / "Apocalypse" / "test-world").mkdir(parents=True)
+    (saves / "Apocalypse" / "test-world" / "sandbox.lua").write_text("return {}")
+    (saves / "Apocalypse" / "test-world" / "map").mkdir()
+
+    # Patch where they're imported: saves.py imports from platforms
+    monkeypatch.setattr("pz_save_manager.saves.get_saves_root", lambda: saves)
+    monkeypatch.setattr("pz_save_manager.backup.get_saves_root", lambda: saves)
+    monkeypatch.setattr("pz_save_manager.backup.get_backups_root", lambda: backups)
+
+    app.config["TESTING"] = True
+    return app.test_client()
+
+
+def test_index_shows_saves(client):
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert b"test-world" in resp.data
+    assert b"Apocalypse" in resp.data
+
+
+def test_api_backup_creates_backup(client):
+    resp = client.post("/api/backup", json={"game_mode": "Apocalypse", "save_name": "test-world"})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    assert "timestamp" in data
+
+
+def test_api_backup_missing_save_returns_400(client):
+    resp = client.post("/api/backup", json={"game_mode": "Apocalypse", "save_name": "nonexistent"})
+    assert resp.status_code == 400
+    assert resp.get_json()["ok"] is False
+
+
+def test_api_restore_invalid_returns_400(client):
+    resp = client.post("/api/restore", json={"game_mode": "X", "save_name": "Y", "timestamp": "bad"})
+    assert resp.status_code == 400
+
+
+def test_api_watcher_toggle(client):
+    resp = client.post("/api/watcher/toggle")
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+    resp = client.post("/api/watcher/toggle")
+    assert resp.status_code == 200
+
+exec
+/bin/bash -lc "sed -n '560,590p' src/pz_save_manager/gui.py" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+    print(f"  Backups   : {get_backups_root()}")
+    print(f"  Found     : {save_count} save(s)")
+    print(f"  Diagnostics: {url}/health\n")
+    webbrowser.open(url)
+    app.run(host=host, port=port, debug=False)
+
+codex
+The config path also behaves as cited: `get_all()` merges defaults but `set_()` persists any key, and the GUI does not restrict POST keys. I’m now deciding whether each issue is a correctness/security defect or mostly maintenance noise.
+exec
+/bin/bash -lc "sed -n '1,100p' src/pz_save_manager/platforms.py" in /home/chpo/pz-save-manager
+exec
+/bin/bash -lc 'rg -n "get_backups_dir|backups_dir|config_get|DEFAULTS|auto_start_watcher|debounce_seconds|backup_cooldown_minutes" src tests' in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+"""Cross-platform path helpers for Project Zomboid saves and backups."""
+
+from __future__ import annotations
+
+import os
+import platform
+from pathlib import Path
+
+
+APP_DIR_NAME = ".pz-save-manager"
+ZOMBOID_DIR_NAME = "Zomboid"
+SAVES_DIR_NAME = "Saves"
+BACKUPS_DIR_NAME = "backups"
+
+
+def get_home_dir() -> Path:
+    """Return the user home directory with a Windows-friendly fallback."""
+    if platform.system() == "Windows":
+        user_profile = os.environ.get("USERPROFILE")
+        if user_profile:
+            return Path(user_profile).expanduser()
+    return Path.home()
+
+
+def get_zomboid_dir(home: Path | str | None = None) -> Path:
+    """Return the root Project Zomboid user data directory."""
+    base_home = Path(home).expanduser() if home is not None else get_home_dir()
+    return base_home / ZOMBOID_DIR_NAME
+
+
+def get_saves_root(home: Path | str | None = None) -> Path:
+    """Return the directory containing Project Zomboid save modes."""
+    return get_zomboid_dir(home) / SAVES_DIR_NAME
+
+
+def get_app_dir(home: Path | str | None = None) -> Path:
+    """Return this tool per-user data directory."""
+    base_home = Path(home).expanduser() if home is not None else get_home_dir()
+    return base_home / APP_DIR_NAME
+
+
+def get_backups_root(home: Path | str | None = None) -> Path:
+    """Return the root directory containing all backups.
+
+    Respects the configured custom backup directory if set.
+    """
+    from .config import get_backups_dir
+    custom = get_backups_dir()
+    if custom is not None:
+        return custom
+    return get_app_dir(home) / BACKUPS_DIR_NAME
+
+ succeeded in 0ms:
+tests/test_watcher.py:23:    watcher = SaveWatcher(save, debounce_seconds=0.05, on_backup=lambda b: backups.append(b))
+tests/test_watcher.py:64:    watcher = manager.watch(save, debounce_seconds=0.05, backup_cooldown_seconds=0.0)
+tests/test_watcher.py:87:    watcher = manager.watch(save, debounce_seconds=0.05, backup_cooldown_seconds=0.0)
+tests/test_watcher.py:105:    watcher = SaveWatcher(save, debounce_seconds=0.05, on_backup=lambda b: backups.append(b))
+src/pz_save_manager/config.py:17:DEFAULTS = {
+src/pz_save_manager/config.py:18:    "backups_dir": None,
+src/pz_save_manager/config.py:19:    "debounce_seconds": 5.0,
+src/pz_save_manager/config.py:20:    "backup_cooldown_minutes": 1,
+src/pz_save_manager/config.py:22:    "auto_start_watcher": False,
+src/pz_save_manager/config.py:60:    return DEFAULTS.get(key)
+src/pz_save_manager/config.py:72:    result = dict(DEFAULTS)
+src/pz_save_manager/config.py:77:def get_backups_dir() -> Path | None:
+src/pz_save_manager/config.py:79:    val = get("backups_dir")
+src/pz_save_manager/watcher.py:23:        debounce_seconds: float = 5.0,
+src/pz_save_manager/watcher.py:28:        self.debounce_seconds = debounce_seconds
+src/pz_save_manager/watcher.py:76:            self._timer = threading.Timer(self.debounce_seconds, self._do_backup)
+src/pz_save_manager/watcher.py:147:    def watch(self, save: SaveGame, debounce_seconds: float = 5.0, backup_cooldown_seconds: float = 300.0) -> SaveWatcher:
+src/pz_save_manager/watcher.py:151:        watcher = SaveWatcher(save, debounce_seconds, backup_cooldown_seconds)
+src/pz_save_manager/cli.py:29:def main(ctx: click.Context, saves_dir: str | None, backups_dir: str | None) -> None:
+src/pz_save_manager/cli.py:33:    ctx.obj["backups_root"] = _path_option(backups_dir) or get_backups_root()
+src/pz_save_manager/cli.py:166:    if key == "debounce_seconds":
+src/pz_save_manager/cli.py:168:    elif key == "backup_cooldown_minutes":
+src/pz_save_manager/cli.py:174:    elif key in ("auto_start_watcher",):
+src/pz_save_manager/cli.py:176:    elif key == "backups_dir" and value in ("", "none", "null"):
+tests/test_adversarial.py:130:    watcher = watcher_mod.SaveWatcher(save, debounce_seconds=0)
+src/pz_save_manager/platforms.py:47:    from .config import get_backups_dir
+src/pz_save_manager/platforms.py:48:    custom = get_backups_dir()
+src/pz_save_manager/gui.py:12:from .config import get_all as config_get_all, set_ as config_set
+src/pz_save_manager/gui.py:190:function toggleSettings(){var o=document.getElementById('settings-overlay');if(o.style.display==='flex'){o.style.display='none'}else{o.style.display='flex';api('GET','/api/config').then(r=>r.json()).then(d=>{document.getElementById('cfg-backups-dir').value=d.backups_dir||'';document.getElementById("cfg-cooldown").value=d.backup_cooldown_minutes;document.getElementById("cfg-max-auto").value=d.max_auto_backups})}}
+src/pz_save_manager/gui.py:191:function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,backup_cooldown_minutes:document.getElementById("cfg-cooldown").value,max_auto_backups:document.getElementById("cfg-max-auto").value};doAction(null,'/api/config',data,'Settings saved!')}
+src/pz_save_manager/gui.py:430:    cooldown = config_get_all().get("backup_cooldown_minutes", 5) * 60
+src/pz_save_manager/gui.py:461:        return jsonify(config_get_all())
+src/pz_save_manager/gui.py:465:            # Allow clearing string-typed settings (e.g. resetting backups_dir to default)
+src/pz_save_manager/gui.py:466:            if key == "backups_dir":
+src/pz_save_manager/gui.py:471:            if key == "debounce_seconds":
+src/pz_save_manager/gui.py:473:            elif key == "backup_cooldown_minutes":
+src/pz_save_manager/gui.py:479:            elif key == "auto_start_watcher":
+src/pz_save_manager/gui.py:485:    return jsonify({"ok": True, "message": "Settings saved", "config": config_get_all()})
+src/pz_save_manager/backup.py:217:        from .config import get as config_get
+src/pz_save_manager/backup.py:218:        max_auto = config_get("max_auto_backups")
+
+exec
+/bin/bash -lc 'rg -n "CLAUDE|_validate_component|atomic|completion|watcher|CSRF|Host|auth" CLAUDE.md README* pyproject.toml' in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+README.md:82:The watcher monitors your save directory. When Project Zomboid writes save files,
+README.md:83:the watcher waits 5 seconds (configurable), then snapshots the entire save.
+README.md:138:All of PZ Save Manager's core features — atomic backups, file watching, metadata extraction from `players.db` — require these filesystem operations. They are simply impossible from inside the game.
+README.md:148:| Backup automation (watcher) | ❌ needs external app | ✅ built-in |
+README.md:156:| Auto-backup on player death | ✅ (with companion app) | ❌ (watcher only) |
+CLAUDE.md:1:# CLAUDE.md
+CLAUDE.md:27:- `backup.py` — atomic backup/restore. Key invariants enforced here:
+CLAUDE.md:31:  - Component validation lives in `_validate_component`; reuse it for any new path-accepting API.
+CLAUDE.md:32:- `watcher.py` — `SaveWatcher` (per-save debounced backup) + `WatcherManager` (singleton via `get_manager()`). The manager re-creates `Observer()` on restart because watchdog observers can't be reused after `.stop()`. Backup failures inside `_do_backup` must be logged (not silently swallowed) — the adversarial test enforces this.
+CLAUDE.md:41:`tests/conftest.py` injects `src/` into `sys.path`, so tests import `pz_save_manager` without an editable install. `tests/test_adversarial.py` encodes the P0 security invariants — keep these passing when touching `backup.py`, `saves.py`, or `watcher.py`.
+
+codex
+A couple of the design nits are real but low impact: the stale `5` fallback is dead because defaults are always merged, and the unused Flask import is indeed just cleanup. I have enough to produce the JSON now.
+codex
+One more thing: there are local adversarial-review folders, so I’m checking whether they contain the prior review baseline. That determines whether a valid finding should be marked `validate` or `add`.
+exec
+/bin/bash -lc 'find .adversarial-review .adversarial-review-2 .adversarial-review-3 -maxdepth 2 -type f -print' in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+.adversarial-review/01_review_a.json.err
+.adversarial-review/04_cross_b_on_a.json
+.adversarial-review/03_cross_a_on_b.json
+.adversarial-review/02_review_b.json
+.adversarial-review/01_review_a.json
+.adversarial-review/diff.txt
+.adversarial-review/05_synthesis.md
+.adversarial-review/03_cross_a_on_b.json.err
+.adversarial-review/run.err
+.adversarial-review-2/01_review_a.json.err
+.adversarial-review-2/04_cross_b_on_a.json
+.adversarial-review-2/03_cross_a_on_b.json
+.adversarial-review-2/02_review_b.json
+.adversarial-review-2/01_review_a.json
+.adversarial-review-2/diff.txt
+.adversarial-review-2/05_synthesis.md
+.adversarial-review-2/03_cross_a_on_b.json.err
+.adversarial-review-2/run.err
+.adversarial-review-3/02_review_b.json.err
+.adversarial-review-3/03_cross_a_on_b.json
+.adversarial-review-3/02_review_b.json
+.adversarial-review-3/01_review_a.json
+.adversarial-review-3/diff.txt
+.adversarial-review-3/run.err
+
+exec
+/bin/bash -lc "find .adversarial-review .adversarial-review-2 .adversarial-review-3 -maxdepth 2 -type f -name '*.json' -o -name '*.md' -o -name '*.txt'" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+.adversarial-review/04_cross_b_on_a.json
+.adversarial-review/03_cross_a_on_b.json
+.adversarial-review/02_review_b.json
+.adversarial-review/01_review_a.json
+.adversarial-review/diff.txt
+.adversarial-review/05_synthesis.md
+.adversarial-review-2/04_cross_b_on_a.json
+.adversarial-review-2/03_cross_a_on_b.json
+.adversarial-review-2/02_review_b.json
+.adversarial-review-2/01_review_a.json
+.adversarial-review-2/diff.txt
+.adversarial-review-2/05_synthesis.md
+.adversarial-review-3/03_cross_a_on_b.json
+.adversarial-review-3/02_review_b.json
+.adversarial-review-3/01_review_a.json
+.adversarial-review-3/diff.txt
+
+codex
+The latest review artifacts are present. I’ll read the two reviewer JSON files from the newest run just enough to map “missed” accurately.
+exec
+/bin/bash -lc "sed -n '1,240p' .adversarial-review-3/01_review_a.json" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+{
+  "findings": [
+    {
+      "id": "A1",
+      "severity": "major",
+      "file": "src/pz_save_manager/gui.py",
+      "line": 1,
+      "category": "security",
+      "title": "State-mutating HTTP endpoints have no authentication or CSRF/Host protection",
+      "description": "The Flask app exposes destructive, unauthenticated POST endpoints — /api/restore (overwrites the live save), /api/backup/delete, /api/save/rename, /api/config, and /api/shutdown. There is no CSRF token, no Origin/Referer check, and no Host-header allow-list. Even bound to 127.0.0.1, the server is reachable by any process/page on the machine, and is exposed to two real browser-based attacks while the GUI is running: (1) DNS-rebinding — a malicious site can rebind its hostname to 127.0.0.1 and then issue same-origin requests to port 8080, and (2) cross-origin requests that browsers permit without preflight. Because get_json(silent=True) is used, an attacker doesn't even need a valid JSON content type to reach the handler logic in some configurations. A single forged request to /api/restore can irrecoverably replace the user's current save with an old backup; /api/shutdown can kill the app. The --host option also lets a user trivially bind 0.0.0.0, exposing all of this to the LAN with zero auth.",
+      "suggestion": "Validate the Host header against an explicit allow-list (127.0.0.1:PORT / localhost:PORT) and reject everything else (blocks DNS-rebinding). Require a Origin/Referer same-origin check on all mutating routes, or issue a per-session CSRF token embedded in PAGE and verified server-side. Generate a random token at startup and require it as a header on /api/* calls. Refuse to bind a non-loopback host unless an explicit --allow-remote flag plus auth is supplied."
+    },
+    {
+      "id": "A2",
+      "severity": "major",
+      "file": "src/pz_save_manager/watcher.py",
+      "line": 120,
+      "category": "concurrency",
+      "title": "WatcherManager mutates shared state with no lock under a threaded Flask server",
+      "description": "Werkzeug's dev server runs with threaded=True by default, so /api/watcher/toggle, /api/watcher/save, /api/restore (pause_for), and /api/save/rename can execute concurrently in different request threads. All of them mutate WatcherManager._watchers, ._watches, ._running, and call self._observer.schedule/unschedule with no synchronization. start() additionally reads-then-rebuilds the observer and re-iterates _watchers while another thread may be inserting into it (RuntimeError: dict changed size during iteration), and watch()/unwatch() race on the same keys. This can corrupt the watch maps, double-schedule observers, or crash a request. The per-watcher SaveWatcher is internally locked, but the manager that owns them is not.",
+      "suggestion": "Add a threading.Lock (or RLock) to WatcherManager and guard every method that touches _watchers/_watches/_running/_observer. Snapshot collections under the lock before iterating (e.g. list(self._watchers.items())) and never call observer.schedule while holding it if that can deadlock with the observer thread — design the critical sections accordingly."
+    },
+    {
+      "id": "A3",
+      "severity": "major",
+      "file": "src/pz_save_manager/watcher.py",
+      "line": 205,
+      "category": "concurrency",
+      "title": "get_manager() lazy singleton has a check-then-act race",
+      "description": "get_manager() does `if _manager is None: _manager = WatcherManager()` with no lock. Under the threaded Flask server, two concurrent first requests (e.g. index render + an /api/* call) can both observe None and each construct a WatcherManager, each with its own watchdog Observer. One instance is then discarded but may already have been started/scheduled, leaking an observer thread and producing inconsistent watcher state depending on which manager each later request happens to read.",
+      "suggestion": "Guard initialization with a module-level threading.Lock using double-checked locking, or instantiate the singleton eagerly at import time. Given the manager owns OS threads, a single authoritative instance is important."
+    },
+    {
+      "id": "A4",
+      "severity": "major",
+      "file": "src/pz_save_manager/watcher.py",
+      "line": 95,
+      "category": "concurrency",
+      "title": "_do_backup holds the watcher lock across the entire copytree",
+      "description": "_do_backup acquires self._lock and then calls create_backup(...) — a full shutil.copytree of a PZ save that can be hundreds of MB to gigabytes — while still holding the lock. on_modified(), pause(), cancel_pending(), and resume() all block on the same lock, so the watchdog observer thread (which calls on_modified) is stalled for the entire duration of the copy. This defeats debouncing, lets the watchdog event queue back up, and makes pause_for() during a concurrent restore block until the in-flight backup finishes. The lock should only protect the small bookkeeping (timer, timestamps, ignore window), not the long I/O.",
+      "suggestion": "Inside the lock, re-check cooldown/mtime and capture the decision + clear the timer; then release the lock and perform create_backup outside it; re-acquire briefly only to append to _backups and update _last_backup_time/_last_backup_mtime. Guard against overlapping backups with a separate 'in progress' flag rather than the bookkeeping lock."
+    },
+    {
+      "id": "A5",
+      "severity": "minor",
+      "file": "src/pz_save_manager/gui.py",
+      "line": 372,
+      "category": "security",
+      "title": "/api/config writes arbitrary keys with no allow-list",
+      "description": "api_config iterates over every key in the posted JSON and calls config_set(key, value) for all of them. There is no allow-list of permitted settings, so a forged or buggy client can pollute config.json with arbitrary keys, and can repoint backups_dir to any path the user can write (e.g. a synced/cloud folder or a location chosen to clobber unrelated files via the game_mode/save_name/timestamp tree). Combined with A1 this is reachable cross-origin.",
+      "suggestion": "Restrict writes to the known DEFAULTS keys; reject unknown keys with a 400. For backups_dir, validate it is an absolute, writable directory and not a sensitive system path before persisting."
+    },
+    {
+      "id": "A6",
+      "severity": "minor",
+      "file": "src/pz_save_manager/backup.py",
+      "line": 130,
+      "category": "design",
+      "title": "Path-component validation is duplicated three ways across modules",
+      "description": "There are three overlapping validators: saves.get_save() inline check (.., /, \\, \\x00), saves._validate_name() (adds empty/IP/length/_SANE_NAME_RE), and backup._validate_component() (adds empty/'.'/timestamp). They diverge subtly — e.g. _validate_component rejects '.' and empty while get_save does not, and only _validate_name rejects IP-shaped/over-long names. This is exactly the kind of security boundary where drift causes a bypass, and CLAUDE.md explicitly says to reuse _validate_component. The knowledge is spread across two modules with no single source of truth.",
+      "suggestion": "Centralize one validate_component(value, label) in a single module (e.g. saves.py) and have backup.py, get_save, and rename paths all call it. Keep the stricter superset (reject '', '.', '..', '/', '\\', '\\x00', overlong) in one place and unit-test it once."
+    },
+    {
+      "id": "A7",
+      "severity": "minor",
+      "file": "src/pz_save_manager/backup.py",
+      "line": 200,
+      "category": "architecture",
+      "title": "Backups have no completion marker — a crash mid-move leaves a partial backup indistinguishable from a good one",
+      "description": "create_backup reserves the destination dir, copies into a sibling temp, then moves items into the destination one-by-one. The reserved destination directory exists from the very first mkdir. If the process is killed during the per-item move loop (or during the copytree before it), list_backups() will still enumerate the half-populated destination directory as a valid BackupRecord, and restore_backup will happily restore a truncated save over the live one. The atomicity claim in CLAUDE.md ('atomically move contents') only holds per-file, not for the backup as a whole.",
+      "suggestion": "Write a completion sentinel (e.g. .pz-complete) as the final step of create_backup, and have list_backups/get_backup ignore (or flag) destinations lacking it. Alternatively build the backup fully in the temp dir and do a single atomic rename of the temp dir onto the final destination, abandoning the move-loop."
+    },
+    {
+      "id": "A8",
+      "severity": "minor",
+      "file": "src/pz_save_manager/gui.py",
+      "line": 340,
+      "category": "design",
+      "title": "Configured debounce/cooldown are ignored on the per-save watch path",
+      "description": "api_watcher_save calls manager.watch(save) with the hardcoded defaults (debounce 5s, cooldown 300s), while api_watcher_toggle passes the configured backup_cooldown_minutes. So whether your cooldown setting is honored depends on which button started watching — 'Watch' on a single save silently ignores the user's configured cooldown and debounce entirely. debounce_seconds from config is never threaded into the watcher at all.",
+      "suggestion": "Read debounce_seconds and backup_cooldown_minutes from config in a single helper and pass them consistently from both watch entry points (and from auto_start_watcher startup if added)."
+    },
+    {
+      "id": "A9",
+      "severity": "nit",
+      "file": "src/pz_save_manager/gui.py",
+      "line": 339,
+      "category": "design",
+      "title": "Inconsistent default for backup_cooldown_minutes",
+      "description": "api_watcher_toggle uses config_get_all().get('backup_cooldown_minutes', 5), but config.DEFAULTS sets backup_cooldown_minutes to 1. The inline fallback of 5 is dead (get_all always fills the default) but signals a stale assumption and would mislead a maintainer about the real default.",
+      "suggestion": "Drop the redundant inline default and rely on DEFAULTS, or align the literal with DEFAULTS so the intended value is unambiguous."
+    },
+    {
+      "id": "A10",
+      "severity": "nit",
+      "file": "src/pz_save_manager/cli.py",
+      "line": 158,
+      "category": "design",
+      "title": "Dead import in gui_command --no-browser branch",
+      "description": "The --no-browser branch does `import flask` but never uses the module; it then imports app from .gui and calls app.run. The unused import is misleading and duplicates the run logic already in run_gui (which only differs by the webbrowser.open call), so the two startup paths can drift.",
+      "suggestion": "Remove the unused `import flask`. Refactor run_gui to take an open_browser: bool = True flag and have both CLI branches call it, eliminating the duplicated app.run/print block."
+    }
+  ],
+  "overall_assessment": "The core file-system safety work is genuinely good: path-traversal guards, symlink skipping, TOCTOU-safe destination reservation, restore staging with crash recovery, and atomic config writes are all present and backed by adversarial tests. The weak spots are at the boundaries the security tests don't cover: the Flask layer has no auth/CSRF/Host protection over destructive endpoints, and the WatcherManager concurrency model assumes single-threaded access that the default threaded Flask server violates. Validation logic is also duplicated across three functions, which is risky for a security boundary. None of these are catastrophic for a purely single-user loopback desktop tool, but they are real and fixable.",
+  "verdict": "REQUEST_CHANGES",
+  "summary": "0 blockers, 4 majors (web auth/CSRF, 3 concurrency in WatcherManager), 4 minors, 2 nits — solid FS safety, but the HTTP and threading boundaries need hardening."
+}
+exec
+/bin/bash -lc "sed -n '1,260p' .adversarial-review-3/02_review_b.json" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+{"findings":[{"id":"B1","severity":"major","file":"src/pz_save_manager/backup.py","line":194,"category":"bug","title":"Backup is visible before it is complete","description":"create_backup reserves the final timestamp directory before copying, then copies into a sibling .tmp directory and moves entries one by one. During that window, list_backups treats the empty final directory, and any stale .tmp-* directory, as a valid backup because it accepts every directory under the save backup folder. A concurrent UI refresh or restore can expose/restore an empty or partial backup, and a process kill can leave bogus backups permanently listed.","suggestion":"Copy into a hidden temporary directory that list_backups explicitly ignores, then publish the backup with a single final rename. Also filter list_backups to timestamp-shaped directories and skip dot-prefixed temp directories."},{"id":"B2","severity":"major","file":"src/pz_save_manager/backup.py","line":290,"category":"error_handling","title":"Restore cleanup misses shutil.Error failures","description":"restore_backup only catches OSError, but shutil.copytree can raise shutil.Error for aggregated copy failures. In that case temp_target is not removed, previous_target rollback is skipped if the failure happens after renaming, and callers receive an uncategorized exception instead of BackupError.","suggestion":"Catch Exception or at least (OSError, shutil.Error), perform the same cleanup/rollback path, then wrap the original failure in BackupError."},{"id":"B3","severity":"major","file":"src/pz_save_manager/backup.py","line":357,"category":"bug","title":"Backup rename does not normalize the new name","description":"rename_save strips new_name before renaming the live save, and preflight_rename validates a stripped name, but rename_backups_for_save validates and uses the raw new_save_name. A quoted CLI/API rename such as '  Clean  ' moves the save to 'Clean' while moving backups to a different directory named with spaces, splitting the backup history from the save.","suggestion":"Normalize new_save_name once with strip() inside rename_backups_for_save and use the normalized value for validation and new_dir. Add an integration test that renames a save with backups and surrounding whitespace."},{"id":"B4","severity":"major","file":"src/pz_save_manager/gui.py","line":205,"category":"bug","title":"Unknown player state renders as alive","description":"_save_info omits player_dead/player_x/player_y when metadata is unavailable. In Jinja, a missing dict key is Undefined, not None, so the template's 'is none' checks fail: saves without players.db render as Alive and show a blank Position '(, )'. This misreports save state in the main UI.","suggestion":"Initialize expected optional fields in info, for example player_dead=None, player_x=None, player_y=None, player=None, before merging extracted metadata, or use Jinja defined checks."},{"id":"B5","severity":"major","file":"src/pz_save_manager/watcher.py","line":100,"category":"bug","title":"Watcher backs up by default roots instead of watched path","description":"SaveWatcher stores a SaveGame with an explicit path, but _do_backup calls create_backup only with game_mode and name. create_backup re-resolves the save from the default saves root, so a watcher created for an overridden/custom save root can fail or, worse, back up a different default-root save with the same mode/name.","suggestion":"Make SaveWatcher carry saves_root/backups_root or add a backup function that copies directly from self.save.path. Ensure automatic backups use the exact watched SaveGame path."},{"id":"B6","severity":"minor","file":"src/pz_save_manager/gui.py","line":451,"category":"bug","title":"Per-save watcher ignores configured cooldown","description":"The single-save Watch button calls manager.watch(save) with default debounce/cooldown values. That bypasses backup_cooldown_minutes from config, while the all-saves watcher toggle uses the configured cooldown. Users get different auto-backup behavior depending on which UI control they used.","suggestion":"Read config_get_all() in api_watcher_save and pass the same configured debounce_seconds and backup_cooldown_seconds used by the bulk watcher path."},{"id":"B7","severity":"minor","file":"src/pz_save_manager/watcher.py","line":149,"category":"bug","title":"Existing watcher settings never update","description":"WatcherManager.watch immediately returns an existing watcher without applying new debounce or cooldown values. After changing settings, stopping/starting the watcher, or using the bulk toggle, previously watched saves keep stale timing values.","suggestion":"When a watcher already exists, update its debounce_seconds and backup_cooldown_seconds or recreate/reschedule it with the requested settings."},{"id":"B8","severity":"major","file":"src/pz_save_manager/cli.py","line":143,"category":"bug","title":"GUI command ignores global directory overrides","description":"The Click group accepts --saves-dir and --backups-dir, but gui_command does not receive ctx and run_gui has no way to consume ctx.obj. Running 'pz-saves --saves-dir X --backups-dir Y gui' launches the GUI against default/configured directories instead of the requested paths.","suggestion":"Add @click.pass_context to gui_command and propagate ctx.obj roots into the GUI layer, or reject those global options for the gui command if unsupported."},{"id":"B9","severity":"major","file":"src/pz_save_manager/installer.py","line":12,"category":"bug","title":"Installer shortcuts point at the wrong launcher location","description":"PROJECT_DIR is computed as Path(__file__).parent.parent, which is the src directory in this src-layout project or site-packages when installed. install_linux and install_windows then point shortcuts at PROJECT_DIR/launcher.sh or launcher.bat, but those files are not part of the shown package location, so install can create broken launchers.","suggestion":"Resolve the actual installed console entry point or package a launcher resource explicitly. Validate the target exists before writing shortcuts and raise a clear error if it does not."},{"id":"B10","severity":"minor","file":"src/pz_save_manager/save_info.py","line":164,"category":"edge_case","title":"count_players can raise despite defensive extractor contract","description":"count_players calls path.stat() outside the try block after checking is_file(). If players.db is deleted or becomes inaccessible between those calls, FileNotFoundError/OSError escapes, contradicting the module contract that extractors return None/defaults on failure.","suggestion":"Move both is_file() and stat() into the try block, or catch OSError around the whole existence/size check."},{"id":"B11","severity":"minor","file":"src/pz_save_manager/cli.py","line":167,"category":"error_handling","title":"Invalid CLI config values are not converted to ClickException","description":"config_command converts numeric values with float()/int() outside any error handling. Invalid input such as 'pz-saves config port abc' raises ValueError directly instead of producing the same clean ClickException behavior used by backup/restore commands.","suggestion":"Wrap config value conversion in try/except (ValueError, TypeError) and raise click.ClickException with a concise validation message."}],"overall_assessment":"The core functionality is close, but several production-facing edge cases remain around backup publication, restore rollback, rename normalization, watcher configuration, and GUI metadata defaults. The tests cover many prior P0 cases but miss combined workflows such as whitespace rename with backups, custom roots with watchers/GUI, and incomplete temp backup visibility.","verdict":"REQUEST_CHANGES","summary":"11 findings: 7 bugs, 2 error-handling issues, 1 edge case, and 1 installer quality/runtime issue."}
+exec
+/bin/bash -lc "sed -n '1,260p' .adversarial-review-3/03_cross_a_on_b.json" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+I've now verified all the technical claims against the actual code. Here's my devil's advocate assessment.
+
+```json
+{
+  "responses": [
+    {
+      "finding_id": "B1",
+      "action": "validate",
+      "rationale": "Confirmed. _unique_destination reserves the FINAL timestamp dir via mkdir BEFORE any data is copied (backup.py:160-163), then copytree writes into a sibling `.tmp-<ts>-*` dir (line 196) created in destination.parent (= the save's backup dir that list_backups scans), then moves contents in one by one (line 201-202). list_backups (line 245-248) accepts ANY directory with no name/dot filtering, so during the copy window both the empty reserved destination AND the `.tmp-*` sibling are returned as valid BackupRecords. A process kill between mkdir and the finally-rmtree leaves both permanently. Restoring the empty one restores an empty save. Real bug.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B2",
+      "action": "challenge",
+      "rationale": "The central premise is factually wrong. In CPython Python 3, shutil.Error is defined as `class Error(OSError): pass` (Lib/shutil.py) — it is a subclass of OSError. Therefore `except OSError` at backup.py:290 DOES catch shutil.Error, the cleanup/rollback path runs, and the error IS wrapped in BackupError. copytree's aggregated failures and copy2-originated errors are OSError-family. The described gap does not exist. (Broadening to `except Exception` would be defensible defensively, but the stated bug — uncategorized exception escaping, skipped rollback — is incorrect.)",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B3",
+      "action": "validate",
+      "rationale": "Confirmed by reading both sides. rename_save normalizes: new_path uses new_name.strip() (saves.py:157) and returns SaveGame with new_name.strip() (line 164). But rename_backups_for_save uses the RAW new_save_name for new_dir (backup.py:361) and only _validate_component (which permits leading/trailing spaces). CLI rename_command (cli.py:194-195) passes the same raw argument to both. So `pz-saves rename Survivor old '  Clean  '` moves the save to 'Clean' but backups to '  Clean  ', splitting history. preflight_rename normalizes only for its own collision check (backup.py:332), masking the inconsistency. GUI is safe only because JS trims client-side. Real bug.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B4",
+      "action": "validate",
+      "rationale": "Confirmed. _save_info only copies player_dead/player_x/player_y into info if present in extra (gui.py:214-217), and extract_all omits all player_* keys entirely when players.db is absent/unreadable (save_info.py:214-218 are inside the conditional). In Jinja2 a missing dict key yields Undefined, not None: `Undefined is none` is False and Undefined is falsy, so the template (gui.py:93,98) falls through to the else branch and renders '🟢 Alive', and the Position line at line 100 (`is not none`) — Undefined is not none is True, so it renders '(, )' with blank coords. Note the backup cards are NOT affected because they explicitly set player_dead via pi.get('is_dead') (line 248). Bug confined to main save cards, but real.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B5",
+      "action": "validate",
+      "rationale": "Confirmed the code smell: SaveWatcher stores self.save with an explicit .path, but _do_backup (watcher.py:100) calls create_backup(game_mode, name, auto=True) with no saves_root/backups_root, so create_backup re-resolves via get_save against the DEFAULT saves root (backup.py:191). The watched SaveGame.path is ignored. I downgrade the practical severity: every current caller (gui api_watcher_toggle/api_watcher_save and list_saves) uses default roots, so today save.path always equals the default resolution and no misdirected backup actually occurs. It is a latent correctness gap, not an active major bug — but the fix (carry roots / back up from self.save.path) is correct.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B6",
+      "action": "validate",
+      "rationale": "Confirmed. api_watcher_save calls manager.watch(save) (gui.py:451) with no cooldown, defaulting to 300s in WatcherManager.watch (watcher.py:147), while the bulk api_watcher_toggle passes backup_cooldown_seconds from config (gui.py:430-432). Inconsistent behavior between the two UI controls. Minor, valid.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B7",
+      "action": "validate",
+      "rationale": "Confirmed. WatcherManager.watch returns the existing watcher unchanged when the key is already present (watcher.py:149-150), never applying new debounce/cooldown. After a settings change, a re-watch is a no-op on timing. Minor, valid.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B8",
+      "action": "validate",
+      "rationale": "Confirmed. The Click group stores ctx.obj['saves_root']/['backups_root'] from --saves-dir/--backups-dir (cli.py:31-33), but gui_command (cli.py:134) has no @click.pass_context and run_gui/app.run receive no roots. The GUI layer calls list_saves()/create_backup() with no root args, so it always uses default/config dirs. `pz-saves --saves-dir X gui` silently ignores X. Real bug; major because it's a silent wrong-directory operation.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B9",
+      "action": "validate",
+      "rationale": "Confirmed. installer.py:12 PROJECT_DIR = Path(__file__).resolve().parent.parent. __file__ is src/pz_save_manager/installer.py, so PROJECT_DIR resolves to the `src/` directory (or site-packages when pip-installed). launcher.sh/launcher.bat live at the repo root, one level ABOVE src/, so PROJECT_DIR/launcher.sh points at src/launcher.sh which does not exist. The generated .desktop Exec (line 27) and Windows shortcut TargetPath (line 47) are broken. No existence check before writing. Real bug.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B10",
+      "action": "validate",
+      "rationale": "Confirmed. count_players checks `path.is_file() or path.stat().st_size == 0` with stat() OUTSIDE the try block (save_info.py:164). A TOCTOU deletion between is_file() and stat() raises FileNotFoundError (an OSError subclass) that escapes, violating the module's documented 'return None on any failure' contract. Notably count_vehicles (line 147-149) and others do NOT call stat() pre-try, so count_players is the lone offender. Minor, valid edge case.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "B11",
+      "action": "validate",
+      "rationale": "Confirmed. config_command does float()/int() conversions outside any try (cli.py:166-177), so `pz-saves config port abc` raises a raw ValueError with a traceback rather than a clean ClickException, unlike backup/restore which wrap errors (cli.py:68,108). Notably the GUI's api_config already wraps the identical conversions in try/except returning a 400 (gui.py:463-484), so the CLI is the inconsistent one. Minor, valid.",
+      "your_miss": false
+    }
+  ],
+  "new_findings": [
+    {
+      "id": "DA1",
+      "severity": "minor",
+      "file": "src/pz_save_manager/gui.py",
+      "line": 432,
+      "category": "bug",
+      "title": "Configured debounce_seconds is never applied by any watch path",
+      "description": "B6/B7 focus on cooldown, but neither the bulk toggle (api_watcher_toggle, line 430-432 passes only backup_cooldown_seconds) nor the per-save toggle (api_watcher_save, line 451) ever passes debounce_seconds from config. config exposes/accepts debounce_seconds (cli.py:166, gui api_config:471), but every manager.watch() call falls back to the hardcoded 5.0s default (watcher.py:147). So a user-tuned debounce is silently ignored on all code paths, not just the per-save one B6 flagged.",
+      "suggestion": "Read debounce_seconds from config_get_all() and pass it to manager.watch() in both api_watcher_toggle and api_watcher_save, alongside the cooldown fix from B6."
+    }
+  ],
+  "summary": "10 validated, 1 challenged (B2 — shutil.Error subclasses OSError in Py3, so it is already caught), 1 new finding added (configured debounce never applied on any watch path). B5 validated but downgraded to latent (all current callers use default roots)."
+}
+```
+codex
+{
+  "responses": [
+    {
+      "finding_id": "A1",
+      "action": "add",
+      "rationale": "Core finding is legitimate and I missed it. The GUI exposes unauthenticated state-mutating POST routes, including restore/delete/rename/config/shutdown, with no Host allow-list and no CSRF/same-origin protection. The DNS-rebinding and --host 0.0.0.0 cases are real. One nuance: plain cross-origin simple POSTs cannot generally drive the JSON-required handlers because Flask get_json(silent=True) will return None for non-JSON content types, but routes such as /api/shutdown and /api/watcher/toggle need no JSON, and DNS rebinding can reach all of them.",
+      "your_miss": true
+    },
+    {
+      "finding_id": "A2",
+      "action": "add",
+      "rationale": "Valid and missed. WatcherManager mutates _watchers, _watches, _running, and the watchdog Observer from Flask request paths without synchronization, while Flask's dev server is threaded by default. The specific RuntimeError example is overstated because start() already uses list(self._watchers.items()), but the broader races around watch/unwatch/start/stop/pause_for and schedule/unschedule are real.",
+      "your_miss": true
+    },
+    {
+      "finding_id": "A3",
+      "action": "add",
+      "rationale": "Valid and missed. get_manager() is an unlocked lazy singleton. Two concurrent first requests can both observe _manager as None, construct separate WatcherManager instances, and then whichever assignment wins determines future global state. Because managers own Observer instances, this can leak or split watcher state if one request starts/schedules the discarded manager.",
+      "your_miss": true
+    },
+    {
+      "finding_id": "A4",
+      "action": "add",
+      "rationale": "Valid and missed. SaveWatcher._do_backup holds self._lock while calling create_backup(), which can perform a large copytree. That blocks pause(), resume(), cancel_pending(), and on_modified() for the duration of filesystem copying. The lock is protecting bookkeeping, but it is also serializing long I/O and can stall restore pause handling and watchdog event processing.",
+      "your_miss": true
+    },
+    {
+      "finding_id": "A5",
+      "action": "add",
+      "rationale": "Valid and missed. api_config persists every posted key through config_set(), while config.DEFAULTS defines a small intended setting surface. Unknown keys pollute config.json and backups_dir accepts arbitrary user-writable paths without validation. The clobbering risk is bounded by the backup tree layout, but the lack of an allow-list is still a real configuration boundary bug, especially combined with A1.",
+      "your_miss": true
+    },
+    {
+      "finding_id": "A6",
+      "action": "add",
+      "rationale": "Valid and missed. The code has three divergent component/name validators: get_save inline checks, saves._validate_name(), and backup._validate_component(). They reject different sets of names, and CLAUDE.md explicitly says _validate_component is the source to reuse for path-accepting APIs. This is a maintainability and security-boundary drift risk.",
+      "your_miss": true
+    },
+    {
+      "finding_id": "A7",
+      "action": "validate",
+      "rationale": "Valid, and this overlaps my own B1 finding. create_backup creates the final destination directory before the backup is complete, then copies into a sibling temp directory and moves entries one by one. list_backups accepts any directory under the save backup folder, so an empty or partial final directory, and even stale temp directories, can be surfaced and restored as if complete.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "A8",
+      "action": "add",
+      "rationale": "Valid, with partial overlap. I caught the per-save cooldown inconsistency, but this finding also correctly identifies that debounce_seconds from config is never passed to manager.watch() on any GUI path. api_watcher_toggle passes only backup_cooldown_seconds, while api_watcher_save passes neither debounce nor cooldown, so configured timing behavior is inconsistently or entirely ignored.",
+      "your_miss": true
+    },
+    {
+      "finding_id": "A9",
+      "action": "add",
+      "rationale": "Valid nit and missed. config_get_all() always merges DEFAULTS, so the .get('backup_cooldown_minutes', 5) fallback is dead code. Since DEFAULTS says 1 minute, the literal 5 is stale and misleading even though it has no current behavioral effect.",
+      "your_miss": true
+    },
+    {
+      "finding_id": "A10",
+      "action": "add",
+      "rationale": "Valid nit and missed. gui_command's --no-browser branch imports flask but never uses it, then duplicates the app.run startup path instead of reusing run_gui with browser opening disabled. The unused import is harmless, but the duplicated startup logic can drift.",
+      "your_miss": true
+    }
+  ],
+  "new_findings": [],
+  "summary": "1 validated, 0 challenged, 9 added as missed findings; 0 new findings"
+}
+tokens used
+48 276

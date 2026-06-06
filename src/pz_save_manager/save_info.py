@@ -161,9 +161,9 @@ def count_vehicles(save_path: Path) -> int | None:
 def count_players(save_path: Path) -> int | None:
     """Return the number of players (multiplayer), or None."""
     path = save_path / "players.db"
-    if not path.is_file() or path.stat().st_size == 0:
-        return None
     try:
+        if not path.is_file() or path.stat().st_size == 0:
+            return None
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
             tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
             if "players" in tables:

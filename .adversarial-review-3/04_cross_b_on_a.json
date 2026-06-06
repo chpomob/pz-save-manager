@@ -1,0 +1,66 @@
+{
+  "responses": [
+    {
+      "finding_id": "A1",
+      "action": "add",
+      "rationale": "Core finding is legitimate and I missed it. The GUI exposes unauthenticated state-mutating POST routes, including restore/delete/rename/config/shutdown, with no Host allow-list and no CSRF/same-origin protection. The DNS-rebinding and --host 0.0.0.0 cases are real. One nuance: plain cross-origin simple POSTs cannot generally drive the JSON-required handlers because Flask get_json(silent=True) will return None for non-JSON content types, but routes such as /api/shutdown and /api/watcher/toggle need no JSON, and DNS rebinding can reach all of them.",
+      "your_miss": true
+    },
+    {
+      "finding_id": "A2",
+      "action": "add",
+      "rationale": "Valid and missed. WatcherManager mutates _watchers, _watches, _running, and the watchdog Observer from Flask request paths without synchronization, while Flask's dev server is threaded by default. The specific RuntimeError example is overstated because start() already uses list(self._watchers.items()), but the broader races around watch/unwatch/start/stop/pause_for and schedule/unschedule are real.",
+      "your_miss": true
+    },
+    {
+      "finding_id": "A3",
+      "action": "add",
+      "rationale": "Valid and missed. get_manager() is an unlocked lazy singleton. Two concurrent first requests can both observe _manager as None, construct separate WatcherManager instances, and then whichever assignment wins determines future global state. Because managers own Observer instances, this can leak or split watcher state if one request starts/schedules the discarded manager.",
+      "your_miss": true
+    },
+    {
+      "finding_id": "A4",
+      "action": "add",
+      "rationale": "Valid and missed. SaveWatcher._do_backup holds self._lock while calling create_backup(), which can perform a large copytree. That blocks pause(), resume(), cancel_pending(), and on_modified() for the duration of filesystem copying. The lock is protecting bookkeeping, but it is also serializing long I/O and can stall restore pause handling and watchdog event processing.",
+      "your_miss": true
+    },
+    {
+      "finding_id": "A5",
+      "action": "add",
+      "rationale": "Valid and missed. api_config persists every posted key through config_set(), while config.DEFAULTS defines a small intended setting surface. Unknown keys pollute config.json and backups_dir accepts arbitrary user-writable paths without validation. The clobbering risk is bounded by the backup tree layout, but the lack of an allow-list is still a real configuration boundary bug, especially combined with A1.",
+      "your_miss": true
+    },
+    {
+      "finding_id": "A6",
+      "action": "add",
+      "rationale": "Valid and missed. The code has three divergent component/name validators: get_save inline checks, saves._validate_name(), and backup._validate_component(). They reject different sets of names, and CLAUDE.md explicitly says _validate_component is the source to reuse for path-accepting APIs. This is a maintainability and security-boundary drift risk.",
+      "your_miss": true
+    },
+    {
+      "finding_id": "A7",
+      "action": "validate",
+      "rationale": "Valid, and this overlaps my own B1 finding. create_backup creates the final destination directory before the backup is complete, then copies into a sibling temp directory and moves entries one by one. list_backups accepts any directory under the save backup folder, so an empty or partial final directory, and even stale temp directories, can be surfaced and restored as if complete.",
+      "your_miss": false
+    },
+    {
+      "finding_id": "A8",
+      "action": "add",
+      "rationale": "Valid, with partial overlap. I caught the per-save cooldown inconsistency, but this finding also correctly identifies that debounce_seconds from config is never passed to manager.watch() on any GUI path. api_watcher_toggle passes only backup_cooldown_seconds, while api_watcher_save passes neither debounce nor cooldown, so configured timing behavior is inconsistently or entirely ignored.",
+      "your_miss": true
+    },
+    {
+      "finding_id": "A9",
+      "action": "add",
+      "rationale": "Valid nit and missed. config_get_all() always merges DEFAULTS, so the .get('backup_cooldown_minutes', 5) fallback is dead code. Since DEFAULTS says 1 minute, the literal 5 is stale and misleading even though it has no current behavioral effect.",
+      "your_miss": true
+    },
+    {
+      "finding_id": "A10",
+      "action": "add",
+      "rationale": "Valid nit and missed. gui_command's --no-browser branch imports flask but never uses it, then duplicates the app.run startup path instead of reusing run_gui with browser opening disabled. The unused import is harmless, but the duplicated startup logic can drift.",
+      "your_miss": true
+    }
+  ],
+  "new_findings": [],
+  "summary": "1 validated, 0 challenged, 9 added as missed findings; 0 new findings"
+}
