@@ -115,21 +115,26 @@ class WatcherManager:
     """Manages multiple SaveWatcher instances."""
 
     def __init__(self) -> None:
+        self._lock = threading.Lock()
         self._observer = Observer()
         self._watchers: dict[str, SaveWatcher] = {}
-        self._watches: dict[str, object] = {}  # watchdog handles
+        self._watches: dict[str, object] = {}  # Observer watches, used with unschedule
         self._running = False
 
     @property
     def running(self) -> bool:
-        return self._running
+        with self._lock:
+            return self._running
 
     def start(self) -> None:
-        if not self._running:
+        with self._lock:
+            if self._running:
+                return
             if not self._observer.is_alive():
                 self._observer = Observer()
                 # Re-schedule all watched saves
-                for key, watcher in list(self._watchers.items()):
+                watcher_items = list(self._watchers.items())
+                for key, watcher in watcher_items:
                     save = watcher.save
                     handle = self._observer.schedule(watcher, str(save.path), recursive=True)
                     self._watches[key] = handle
@@ -137,45 +142,55 @@ class WatcherManager:
             self._running = True
 
     def stop(self) -> None:
-        for watcher in list(self._watchers.values()):
-            watcher.cancel_pending()
-        if self._running:
-            self._observer.stop()
-            self._observer.join(timeout=5)
-            self._running = False
+        with self._lock:
+            watchers = list(self._watchers.values())
+            for watcher in watchers:
+                watcher.cancel_pending()
+            if self._running:
+                self._observer.stop()
+                self._observer.join(timeout=5)
+                self._running = False
 
     def watch(self, save: SaveGame, debounce_seconds: float = 5.0, backup_cooldown_seconds: float = 300.0) -> SaveWatcher:
         key = save.display_name
-        if key in self._watchers:
-            old_watcher = self._watchers[key]
-            old_watcher.cancel_pending()
-            # Create new watcher with updated settings
+        with self._lock:
+            if key in self._watchers:
+                old_watcher = self._watchers[key]
+                old_watcher.cancel_pending()
+                # Create new watcher with updated settings and re-schedule
+                watcher = SaveWatcher(save, debounce_seconds, backup_cooldown_seconds)
+                self._watchers[key] = watcher
+                if key in self._watches:
+                    self._observer.unschedule(self._watches[key])
+                handle = self._observer.schedule(watcher, str(save.path), recursive=True)
+                self._watches[key] = handle
+                return watcher
             watcher = SaveWatcher(save, debounce_seconds, backup_cooldown_seconds)
             self._watchers[key] = watcher
+            handle = self._observer.schedule(watcher, str(save.path), recursive=True)
+            self._watches[key] = handle
             return watcher
-        watcher = SaveWatcher(save, debounce_seconds, backup_cooldown_seconds)
-        self._watchers[key] = watcher
-        handle = self._observer.schedule(watcher, str(save.path), recursive=True)
-        self._watches[key] = handle
-        return watcher
 
     def unwatch(self, save: SaveGame) -> None:
         key = save.display_name
-        if key in self._watches:
-            self._observer.unschedule(self._watches[key])
-            del self._watches[key]
-        if key in self._watchers:
-            watcher = self._watchers.pop(key)
-            watcher.cancel_pending()
+        with self._lock:
+            if key in self._watches:
+                self._observer.unschedule(self._watches[key])
+                del self._watches[key]
+            if key in self._watchers:
+                watcher = self._watchers.pop(key)
+                watcher.cancel_pending()
 
     def watched_saves(self) -> list[str]:
-        return sorted(self._watchers.keys())
+        with self._lock:
+            return sorted(self._watchers.keys())
 
     def get_backups(self, save: SaveGame) -> list[BackupRecord]:
         key = save.display_name
-        if key in self._watchers:
-            return list(self._watchers[key]._backups)
-        return []
+        with self._lock:
+            if key in self._watchers:
+                return list(self._watchers[key]._backups)
+            return []
 
     @contextmanager
     def pause_for(self, save: SaveGame):
@@ -186,7 +201,8 @@ class WatcherManager:
         events still in watchdog's queue from the operation get dropped
         instead of triggering an immediate auto-backup.
         """
-        watcher = self._watchers.get(save.display_name)
+        with self._lock:
+            watcher = self._watchers.get(save.display_name)
         if watcher is not None:
             watcher.pause()
         try:
@@ -198,10 +214,13 @@ class WatcherManager:
 
 # Global instance
 _manager: WatcherManager | None = None
+_manager_lock = threading.Lock()
 
 
 def get_manager() -> WatcherManager:
     global _manager
     if _manager is None:
-        _manager = WatcherManager()
+        with _manager_lock:
+            if _manager is None:
+                _manager = WatcherManager()
     return _manager
