@@ -22,7 +22,7 @@ def start_watching_saves(
     """Watch all discovered saves using the current debounce/cooldown settings."""
     saves = list_saves(saves_root=saves_root)
     cfg = config.get_all()
-    cooldown = cfg.get("backup_cooldown_minutes", 1) * 60
+    cooldown = cfg.get("backup_cooldown_minutes", 5) * 60
     debounce = cfg.get("debounce_seconds", 5.0)
     for save in saves:
         manager.watch(

@@ -177,7 +177,7 @@ def api_watcher_save():
         manager.unwatch(save)
         return jsonify({"ok": True, "message": f"Unwatched {save.name}"})
     cfg = _config_store().get_all()
-    cooldown = cfg.get("backup_cooldown_minutes", 1) * 60
+    cooldown = cfg.get("backup_cooldown_minutes", 5) * 60
     debounce = cfg.get("debounce_seconds", 5.0)
     manager.watch(
         save,
