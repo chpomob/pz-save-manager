@@ -38,7 +38,7 @@ def get_save_modified_time(save: SaveGame) -> float:
     the same answer for any normal play session.
     """
     latest = 0.0
-    for name in ("sandbox.lua", "players.db", "vehicles.db", "map_ver.bin", "map"):
+    for name in ("sandbox.lua", "players.db", "vehicles.db", "map_ver.bin"):
         try:
             t = (save.path / name).stat().st_mtime
             if t > latest:
