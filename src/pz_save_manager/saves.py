@@ -37,7 +37,7 @@ def get_save_modified_time(save: SaveGame) -> float:
     Sampling the save dir + the files PZ actually writes to is O(1) and gives
     the same answer for any normal play session.
     """
-    latest = save.path.stat().st_mtime
+    latest = 0.0
     for name in ("sandbox.lua", "players.db", "vehicles.db", "map_ver.bin", "map"):
         try:
             t = (save.path / name).stat().st_mtime

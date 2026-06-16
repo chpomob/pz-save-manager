@@ -126,7 +126,7 @@ def test_watcher_logs_backup_failures(
 
     save_dir = tmp_path / "World"
     save_dir.mkdir()
-    (save_dir / "map.bin").write_text("x", encoding="utf-8")
+    (save_dir / "sandbox.lua").write_text("x", encoding="utf-8")
     save = SaveGame("Sandbox", "World", save_dir)
     watcher = watcher_mod.SaveWatcher(save, debounce_seconds=0)
 

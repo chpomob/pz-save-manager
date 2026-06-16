@@ -19,7 +19,7 @@ class FakeEvent:
 def test_save_watcher_debounce(tmp_path: Path, monkeypatch):
     save_dir = tmp_path / "Sandbox" / "test-save"
     save_dir.mkdir(parents=True)
-    (save_dir / "map.bin").write_text("x")
+    (save_dir / "sandbox.lua").write_text("x")
     save = SaveGame("Sandbox", "test-save", save_dir)
 
     from pz_save_manager.backup import create_backup
