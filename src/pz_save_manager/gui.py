@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import datetime
 from html import escape
 from ipaddress import ip_address
 from pathlib import Path
+from traceback import format_exc
 
 from flask import Flask, abort, current_app, render_template, request, send_file
 
@@ -105,8 +107,6 @@ def index():
             try:
                 save_infos.append(_save_info(save, manager))
             except Exception:
-                import logging
-
                 logging.getLogger(__name__).warning("could not read save %s", save.display_name, exc_info=True)
         all_backups = list_backups(backups_root=_backups_root())
         backup_count = len(all_backups)
@@ -136,18 +136,16 @@ def index():
             csrf_token=_generate_csrf_token(),
         )
     except Exception:
-        from traceback import format_exc
-
+        if current_app.debug:
+            raise
         tb = format_exc()
-        import logging
 
         logging.getLogger(__name__).error("index page failed:\n%s", tb)
         return (
             "<!doctype html><meta charset='utf-8'><style>body{font-family:monospace;background:#111;color:#eee;padding:2rem}pre{white-space:pre-wrap;background:#222;padding:1rem;border-radius:6px;overflow-x:auto}</style>"
             "<h2>PZ Save Manager — Error</h2>"
-            "<p>The UI failed to load. Check the console for details.</p>"
-            "<p>Try <a href='/health' style='color:#e94560'>/health</a> for diagnostics.</p>"
-            f"<pre>{escape(tb)}</pre>"
+            "<p>The UI failed to load. The full error has been logged to the console.</p>"
+            "<p>Try <a href='/health' style='color:#e94560'>/health</a> for diagnostics, or run with <code>pz-saves gui --debug</code> to see the traceback.</p>"
         ), 500
 
 
