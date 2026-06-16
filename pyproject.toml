@@ -18,7 +18,6 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
-    "pytest-cov",
 ]
 
 [project.scripts]
@@ -26,6 +25,9 @@ pz-saves = "pz_save_manager.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+pz_save_manager = ["templates/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

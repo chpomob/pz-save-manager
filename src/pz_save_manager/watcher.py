@@ -6,12 +6,16 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from .backup import BackupRecord, create_backup
 from .saves import SaveGame
+
+if TYPE_CHECKING:
+    from .config import ConfigStore
 
 
 class SaveWatcher(FileSystemEventHandler):
@@ -23,8 +27,9 @@ class SaveWatcher(FileSystemEventHandler):
         debounce_seconds: float = 5.0,
         backup_cooldown_seconds: float = 300.0,
         on_backup: callable | None = None,
-        saves_root=None,
-        backups_root=None,
+        saves_root: Path | str | None = None,
+        backups_root: Path | str | None = None,
+        config: "ConfigStore | None" = None,
     ) -> None:
         self.save = save
         self.debounce_seconds = debounce_seconds
@@ -32,6 +37,7 @@ class SaveWatcher(FileSystemEventHandler):
         self.on_backup = on_backup
         self.saves_root = saves_root
         self.backups_root = backups_root
+        self.config = config
         self._last_event = 0.0
         self._timer: threading.Timer | None = None
         self._lock = threading.Lock()
@@ -62,6 +68,17 @@ class SaveWatcher(FileSystemEventHandler):
             if self._timer is not None:
                 self._timer.cancel()
                 self._timer = None
+
+    def wait_idle(self, timeout: float = 30.0) -> bool:
+        """Wait until no backup is running or queued for this watcher."""
+        deadline = time.time() + timeout
+        while True:
+            with self._lock:
+                if not self._in_progress and self._timer is None:
+                    return True
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.05)
 
     def resume(self, grace_seconds: float = 1.0) -> None:
         """Re-enable events, with a short grace window for in-flight
@@ -111,7 +128,14 @@ class SaveWatcher(FileSystemEventHandler):
                 started_backup = True
                 callback = self.on_backup
 
-            backup = create_backup(self.save.game_mode, self.save.name, auto=True, saves_root=self.saves_root, backups_root=self.backups_root)
+            backup = create_backup(
+                self.save.game_mode,
+                self.save.name,
+                auto=True,
+                saves_root=self.saves_root,
+                backups_root=self.backups_root,
+                config=self.config,
+            )
 
             with self._lock:
                 self._backups.append(backup)
@@ -138,7 +162,15 @@ class SaveWatcher(FileSystemEventHandler):
 class WatcherManager:
     """Manages multiple SaveWatcher instances."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        config: "ConfigStore | None" = None,
+        saves_root: Path | str | None = None,
+        backups_root: Path | str | None = None,
+    ) -> None:
+        self.config = config
+        self.saves_root = saves_root
+        self.backups_root = backups_root
         self._lock = threading.Lock()
         self._observer = Observer()
         self._watchers: dict[str, SaveWatcher] = {}
@@ -165,7 +197,7 @@ class WatcherManager:
             self._observer.start()
             self._running = True
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 30.0) -> None:
         with self._lock:
             watchers = list(self._watchers.values())
             for watcher in watchers:
@@ -174,22 +206,48 @@ class WatcherManager:
                 self._observer.stop()
                 self._observer.join(timeout=5)
                 self._running = False
+        deadline = time.time() + timeout
+        for watcher in watchers:
+            watcher.wait_idle(max(0.0, deadline - time.time()))
 
-    def watch(self, save: SaveGame, debounce_seconds: float = 5.0, backup_cooldown_seconds: float = 300.0, saves_root=None, backups_root=None) -> SaveWatcher:
+    def watch(
+        self,
+        save: SaveGame,
+        debounce_seconds: float = 5.0,
+        backup_cooldown_seconds: float = 300.0,
+        saves_root: Path | str | None = None,
+        backups_root: Path | str | None = None,
+    ) -> SaveWatcher:
         key = save.display_name
+        resolved_saves_root = saves_root if saves_root is not None else self.saves_root
+        resolved_backups_root = backups_root if backups_root is not None else self.backups_root
         with self._lock:
             if key in self._watchers:
                 old_watcher = self._watchers[key]
                 old_watcher.cancel_pending()
                 # Create new watcher with updated settings and re-schedule
-                watcher = SaveWatcher(save, debounce_seconds, backup_cooldown_seconds, saves_root=saves_root, backups_root=backups_root)
+                watcher = SaveWatcher(
+                    save,
+                    debounce_seconds,
+                    backup_cooldown_seconds,
+                    saves_root=resolved_saves_root,
+                    backups_root=resolved_backups_root,
+                    config=self.config,
+                )
                 self._watchers[key] = watcher
                 if key in self._watches:
                     self._observer.unschedule(self._watches[key])
                 handle = self._observer.schedule(watcher, str(save.path), recursive=True)
                 self._watches[key] = handle
                 return watcher
-            watcher = SaveWatcher(save, debounce_seconds, backup_cooldown_seconds, saves_root=saves_root, backups_root=backups_root)
+            watcher = SaveWatcher(
+                save,
+                debounce_seconds,
+                backup_cooldown_seconds,
+                saves_root=resolved_saves_root,
+                backups_root=resolved_backups_root,
+                config=self.config,
+            )
             self._watchers[key] = watcher
             handle = self._observer.schedule(watcher, str(save.path), recursive=True)
             self._watches[key] = handle
@@ -208,6 +266,19 @@ class WatcherManager:
     def watched_saves(self) -> list[str]:
         with self._lock:
             return sorted(self._watchers.keys())
+
+    def watcher_settings(self, save: SaveGame) -> tuple[float, float, Path | str | None, Path | str | None] | None:
+        """Return the active watcher settings for a save, if it is watched."""
+        with self._lock:
+            watcher = self._watchers.get(save.display_name)
+            if watcher is None:
+                return None
+            return (
+                watcher.debounce_seconds,
+                watcher.backup_cooldown_seconds,
+                watcher.saves_root,
+                watcher.backups_root,
+            )
 
     def get_backups(self, save: SaveGame) -> list[BackupRecord]:
         key = save.display_name
@@ -241,10 +312,14 @@ _manager: WatcherManager | None = None
 _manager_lock = threading.Lock()
 
 
-def get_manager() -> WatcherManager:
+def get_manager(
+    config: "ConfigStore | None" = None,
+    saves_root: Path | str | None = None,
+    backups_root: Path | str | None = None,
+) -> WatcherManager:
     global _manager
     if _manager is None:
         with _manager_lock:
             if _manager is None:
-                _manager = WatcherManager()
+                _manager = WatcherManager(config=config, saves_root=saves_root, backups_root=backups_root)
     return _manager

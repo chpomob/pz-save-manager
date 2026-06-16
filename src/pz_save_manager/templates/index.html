@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PZ Save Manager</title>
+<style>
+:root{--bg:#0d0d0d;--surface:#1a1a2e;--card:#16213e;--accent:#e94560;--accent2:#0f3460;--text:#eaeaea;--muted:#8892b0;--radius:10px;--green:#2ecc71;--red:#e74c3c;--yellow:#f39c12;--dead:#7f8c8d}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+header{background:var(--surface);padding:1rem 2rem;display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid var(--accent)}
+header h1{font-size:1.3rem;font-weight:700}header h1 span{color:var(--accent)}
+.status{display:flex;gap:1rem;align-items:center;font-size:.82rem}
+.badge{background:var(--accent2);padding:.3rem .7rem;border-radius:20px;font-weight:500}
+.badge.on{background:var(--green);color:#000}.badge.off{background:var(--accent2)}
+.container{max-width:900px;margin:0 auto;padding:1.5rem}
+h2{font-size:1rem;margin-bottom:.8rem;color:var(--accent);text-transform:uppercase;letter-spacing:1px;padding:.4rem 0;border-bottom:1px solid rgba(255,255,255,.08)}
+h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weight:500}
+/* Compact card */
+.card{background:var(--card);border-radius:var(--radius);border:1px solid rgba(255,255,255,.05);margin-bottom:.7rem;overflow:hidden;transition:border .15s}
+.card:hover{border-color:rgba(255,255,255,.15)}
+.card-header{display:flex;align-items:center;padding:.7rem .9rem;cursor:pointer;gap:.6rem;user-select:none;overflow:hidden}
+.card-header .thumb{width:48px;height:36px;border-radius:4px;object-fit:cover;flex-shrink:0;background:var(--accent2)}
+.card-header .info{flex:1 1 0;min-width:0;overflow:hidden}
+.card-header .info .name{font-weight:600;font-size:.85rem;white-space:normal;word-break:break-word;max-width:100%;display:block}
+.card-header .info .sub{font-size:.7rem;color:var(--muted);margin-top:1px;white-space:normal;word-break:break-word;max-width:100%;display:block}
+.card-header .status-dot{width:12px;height:12px;border-radius:50%;flex-shrink:0}
+.status-alive{background:var(--green);box-shadow:0 0 8px var(--green)}
+.status-dead{background:var(--dead)}
+.status-unknown{background:var(--yellow)}
+.card-header .arrow{color:var(--muted);font-size:1.2rem;transition:transform .2s;flex-shrink:0}
+.card.open .card-header .arrow{transform:rotate(180deg)}
+/* Detail panel */
+.card-body{display:none;padding:0 1rem 1rem;border-top:1px solid rgba(255,255,255,.06)}
+.card.open .card-body{display:block}
+.card-body .detail-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:.5rem;margin-bottom:.8rem}
+.detail-item{font-size:.8rem;color:var(--muted)}
+.detail-item strong{color:var(--text);display:block}
+.backup-list{border-top:1px solid rgba(255,255,255,.06);padding-top:.6rem;margin-top:.5rem}
+.backup-item{display:flex;justify-content:space-between;align-items:center;padding:.3rem 0;font-size:.78rem}
+.backup-item .ts{font-family:monospace;color:var(--muted);margin-right:1rem}
+.btn{padding:.4rem .85rem;border:none;border-radius:6px;cursor:pointer;font-size:.78rem;font-weight:600;transition:filter .15s}
+.btn:hover{filter:brightness(1.15)}.btn:active{transform:translateY(1px)}
+.btn-accent{background:var(--accent);color:#fff}.btn-green{background:var(--green);color:#000}.btn-red{background:var(--red);color:#fff}
+.help{display:inline-block;width:16px;height:16px;line-height:16px;text-align:center;border-radius:50%;background:var(--accent2);color:var(--text);font-size:.65rem;font-weight:700;cursor:help;margin-left:4px;vertical-align:middle}
+.btn-sm{padding:.25rem .6rem;font-size:.72rem}
+.actions{display:flex;gap:.4rem;margin-top:.5rem;flex-wrap:wrap}
+.empty{text-align:center;padding:3rem;color:var(--muted)}
+.toast{position:fixed;bottom:1rem;right:1rem;background:var(--green);color:#000;padding:.7rem 1.2rem;border-radius:var(--radius);font-weight:600;z-index:99;animation:slidein .3s ease}
+@keyframes slidein{from{transform:translateY(60px);opacity:0}to{transform:translateY(0);opacity:1}}
+</style>
+</head>
+<body>
+<header>
+<h1>🧟 <span>PZ</span> Save Manager</h1>
+<div class="status">
+<span>Watcher: <span class="badge {{'on' if watcher_running else 'off'}}">{{'RUNNING' if watcher_running else 'STOPPED'}}</span></span>
+<button class="btn btn-sm {{'btn-red' if watcher_running else 'btn-green'}}" onclick="toggleWatcher()">{{'Stop' if watcher_running else 'Start'}} Watcher</button>
+<button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick="toggleSettings()">⚙</button>
+<button class="btn btn-sm btn-red" onclick="shutdown()" title="Close app">✕</button>
+</div>
+</header>
+<div class="container">
+<h2>📁 Saves ({{saves|length}})</h2>
+{% if not saves %}<div class="empty">No saves found. Launch Project Zomboid!</div>{% endif %}
+<div class="grid">
+{% for save in saves %}
+<div class="card" id="save-{{loop.index}}">
+<div class="card-header" onclick="this.parentElement.classList.toggle('open')">
+{% if save.has_thumbnail %}<img src="/thumb/{{save.game_mode}}/{{save.full_name}}" class="thumb" loading="lazy">{% else %}<div class="thumb"></div>{% endif %}
+<div class="info">
+<div class="name" title="{{save.full_name}}">{{save.name}}</div>
+<div class="sub">{{save.game_mode}} · {{save.modified}}</div>
+</div>
+<div class="status-dot {% if save.player_dead is none %}status-unknown{% elif save.player_dead %}status-dead{% else %}status-alive{% endif %}" title="{% if save.player_dead is none %}Unknown{% elif save.player_dead %}Dead{% else %}Alive{% endif %}"></div>
+<span class="arrow">▾</span>
+</div>
+<div class="card-body">
+<div class="detail-grid">
+<div class="detail-item"><strong>Status</strong> {% if save.player_dead is none %}Unknown{% elif save.player_dead %}💀 Dead{% else %}🟢 Alive{% endif %}</div>
+{% if save.player %}<div class="detail-item"><strong>Player</strong> {{save.player}}</div>{% endif %}
+{% if save.player_x is not none %}<div class="detail-item"><strong>Position</strong> ({{save.player_x}}, {{save.player_y}})</div>{% endif %}
+{% if save.player_world_version %}<div class="detail-item"><strong>World Version</strong> {{save.player_world_version}}</div>{% endif %}
+<div class="detail-item"><strong>Modified</strong> {{save.modified}}</div>
+{% if save.mod_count %}<div class="detail-item"><strong>Mods</strong> {{save.mod_count}}</div>{% endif %}
+</div>
+<div class="actions">
+<button class="btn btn-accent" onclick='event.stopPropagation();backup({{save.game_mode|tojson}},{{save.full_name|tojson}},this)'>💾 Backup</button>
+<button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick='event.stopPropagation();toggleWatch({{save.game_mode|tojson}},{{save.full_name|tojson}},this)'>{{'⏸ Unwatch' if save.watched else '👁 Watch'}}</button>
+<button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick='event.stopPropagation();renameSave({{save.game_mode|tojson}},{{save.full_name|tojson}},this)'>✏️ Rename</button>
+</div>
+</div>
+</div>
+{% endfor %}
+</div>
+
+<h2 style="margin-top:2rem">📋 Backups ({{backup_count}})</h2>
+{% if not all_backups %}<div class="empty">No backups yet.</div>{% endif %}
+{% set ns = namespace(current='', open=false) %}
+{% for b in all_backups[:50] %}
+{% set key = b.game_mode + '/' + b.save_name %}
+{% if key != ns.current %}
+{% if ns.open %}</div>{% endif %}
+{% set ns.current = key %}
+{% set ns.open = true %}
+<h3>{{b.game_mode}} / {{b.save_name[:28]}}</h3>
+<div class="grid">
+{% endif %}
+<div class="card">
+<div class="card-header" onclick="this.parentElement.classList.toggle('open')">
+{% if b.has_thumbnail %}<img src="/thumb-backup/{{b.game_mode}}/{{b.real_save_name}}/{{b.timestamp}}" class="thumb" loading="lazy">{% else %}<div class="thumb"></div>{% endif %}
+<div class="info">
+<div class="name" title="{{b.formatted}}">{{b.formatted}}</div>
+<div class="sub">{{b.age}}{% if b.auto %} · 🤖 auto{% else %} · ✋ manuel{% endif %}</div>
+</div>
+<div class="status-dot {% if b.player_dead is none %}status-unknown{% elif b.player_dead %}status-dead{% else %}status-alive{% endif %}"></div>
+<span class="arrow">▾</span>
+</div>
+<div class="card-body">
+<div class="detail-grid">
+<div class="detail-item"><strong>Status</strong> {% if b.player_dead is none %}Unknown{% elif b.player_dead %}💀 Dead{% else %}🟢 Alive{% endif %}</div>
+{% if b.player %}<div class="detail-item"><strong>Player</strong> {{b.player}}</div>{% endif %}
+<div class="detail-item"><strong>Timestamp</strong> {{b.formatted}}</div>
+<div class="detail-item"><strong>Age</strong> {{b.age}}</div>
+<div class="detail-item"><strong>Type</strong> {% if b.auto %}🤖 Automatic{% else %}✋ Manual{% endif %}</div>
+<div class="detail-item"><strong>Save</strong> {{b.game_mode}} / {{b.save_name[:30]}}</div>
+</div>
+{% if b.note %}<div style="background:rgba(233,69,96,.08);border-left:3px solid var(--accent);padding:.5rem .8rem;margin-bottom:.6rem;border-radius:4px;font-size:.78rem;color:var(--text);max-height:80px;overflow-y:auto;white-space:pre-wrap;word-break:break-word">{{b.note}}</div>{% endif %}
+<div class="actions">
+<button class="btn btn-green" onclick='event.stopPropagation();restore({{b.game_mode|tojson}},{{b.real_save_name|tojson}},{{b.timestamp|tojson}},this)'>↩ Restore</button>
+<button class="btn btn-red btn-sm" onclick='event.stopPropagation();deleteBackup({{b.game_mode|tojson}},{{b.real_save_name|tojson}},{{b.timestamp|tojson}},this)'>🗑 Delete</button>
+<button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick='event.stopPropagation();annotate({{b.game_mode|tojson}},{{b.real_save_name|tojson}},{{b.timestamp|tojson}},this)'>📝 Note</button>
+</div>
+</div>
+</div>
+{% endfor %}
+{% if ns.open %}</div>{% endif %}
+{% if backup_count > 50 %}
+<p style="text-align:center;color:var(--muted);font-size:.78rem;padding:.5rem">Showing 50 of {{ backup_count }} backups.</p>
+{% endif %}
+<div id="toast" class="toast" style="display:none"></div>
+<div id="settings-overlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);z-index:100;justify-content:center;align-items:center" onclick="if(event.target===this)toggleSettings()">
+<div style="background:var(--surface);padding:2rem;border-radius:var(--radius);max-width:450px;width:90%;border:1px solid var(--accent)">
+<h3 style="margin-bottom:1rem">⚙ Settings</h3>
+<div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted)">Backup directory <span class="help" title="Where backups are stored. Default: ~/.pz-save-manager/backups">?</span></label>
+<input id="cfg-backups-dir" style="width:100%;padding:.5rem;margin-top:.3rem;background:var(--bg);border:1px solid var(--accent2);color:var(--text);border-radius:6px" placeholder="Default: ~/.pz-save-manager/backups"></div>
+<div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted)">Min interval between backups (minutes) <span class="help" title="After an auto-backup, the watcher waits at least this long before making another one. Prevents backup spam during intense gameplay.">?</span></label>
+<input id="cfg-cooldown" type="number" step="1" min="0" max="1440" style="width:100%;padding:.5rem;margin-top:.3rem;background:var(--bg);border:1px solid var(--accent2);color:var(--text);border-radius:6px"></div>
+<div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted)">Max auto-backups per save <span class="help" title="Maximum number of automatic backups kept per save. Oldest auto-backups are deleted when this limit is reached. Manual backups are never pruned.">?</span></label>
+<input id="cfg-max-auto" type="number" step="1" min="1" max="999" style="width:100%;padding:.5rem;margin-top:.3rem;background:var(--bg);border:1px solid var(--accent2);color:var(--text);border-radius:6px"></div>
+<div style="display:flex;gap:.5rem;justify-content:flex-end">
+<button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick="toggleSettings()">Cancel</button>
+<button class="btn btn-sm btn-green" onclick="saveSettings()">Save</button>
+</div>
+</div>
+</div>
+<meta name="csrf-token" content="{{ csrf_token }}">
+<script>
+function toast(m,c){var t=document.getElementById('toast');t.textContent=m;t.style.background=c||'var(--green)';t.style.display='block';setTimeout(function(){t.style.display='none'},2500)}
+var csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+function api(m,u,b){return fetch(u,{method:m,headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},body:b?JSON.stringify(b):undefined})}
+function doAction(b,url,body,okMsg){
+  if(b)b.disabled=true;
+  return api('POST',url,body).then(r=>r.json()).then(d=>{
+    if(d.ok){toast(okMsg||d.message||'OK');setTimeout(function(){location.reload()},600)}
+    else{toast(d.error||d.message||'Error','var(--red)');if(b)b.disabled=false}
+  }).catch(function(){toast('Network error','var(--red)');if(b)b.disabled=false})
+}
+function backup(m,n,b){doAction(b,'/api/backup',{game_mode:m,save_name:n},'Backup created!')}
+function restore(m,n,t,b){if(!confirm('Restore '+m+'/'+n+' from '+t+'?'))return;doAction(b,'/api/restore',{game_mode:m,save_name:n,timestamp:t},'Restored!')}
+function deleteBackup(m,n,t,b){if(!confirm('Delete backup '+t+'?'))return;doAction(b,'/api/backup/delete',{game_mode:m,save_name:n,timestamp:t},'Deleted!')}
+function toggleWatcher(){doAction(null,'/api/watcher/toggle',null)}
+function renameSave(m,n,b){var name=prompt('New name for '+n+':');if(!name||name.trim()===''||name.trim()===n)return;doAction(b,'/api/save/rename',{game_mode:m,old_name:n,new_name:name.trim()},'Renamed to '+name.trim()+'!')}
+function annotate(m,n,t,b){var note=prompt('Note for '+t+' (empty to remove):');if(note===null)return;doAction(b,'/api/backup/annotate',{game_mode:m,save_name:n,timestamp:t,note:note},note?'Note saved':'Note removed')}
+function toggleWatch(m,n,b){doAction(b,'/api/watcher/save',{game_mode:m,save_name:n})}
+function toggleSettings(){var o=document.getElementById('settings-overlay');if(o.style.display==='flex'){o.style.display='none'}else{o.style.display='flex';api('GET','/api/config').then(r=>r.json()).then(d=>{document.getElementById('cfg-backups-dir').value=d.backups_dir||'';document.getElementById("cfg-cooldown").value=d.backup_cooldown_minutes;document.getElementById("cfg-max-auto").value=d.max_auto_backups})}}
+function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,backup_cooldown_minutes:document.getElementById("cfg-cooldown").value,max_auto_backups:document.getElementById("cfg-max-auto").value};doAction(null,'/api/config',data,'Settings saved!')}
+function shutdown(){if(!confirm('Close PZ Save Manager?'))return;api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style="text-align:center;padding:4rem;color:#888"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'}).catch(function(){toast('Network error','var(--red)')})}
+</script>
+</body>
+</html>

@@ -1,0 +1,83 @@
+# pz-save-manager — Architectural Refactor (3 majors)
+
+Refactor `~/pz-save-manager` to fix 3 architectural issues:
+
+1. **God object** — Extract template, split routes, factor CSRF from gui.py
+2. **No DI** — Pass explicit dependencies through CLI main() and Flask create_app()
+3. **Layering** — Extract backup_service.py + save_service.py for orchestration logic
+
+Run `uv run pytest tests/ -v` after each phase. Update any test that breaks.
+
+## Phase 1: Extract template + split routes (god object)
+
+### 1a. Extract inline HTML template
+- Move the 250-line inline HTML/CSS/JS template from `gui.py` (the `PAGE` variable or the big f-string/html template inside `_render_page` or `index`) to `src/pz_save_manager/templates/index.html`
+- Use `pathlib.Path(__file__).parent / "templates" / "index.html"` to load it at runtime
+- If Flask's `render_template` is available and easy, use it; otherwise just `read_text()` + `.format()` or `.replace()` — keep it simple, no extra deps
+
+### 1b. Split route handlers from gui.py
+- Create a new file `src/pz_save_manager/routes_api.py` containing:
+  - `api_backup()`, `api_restore()`, `api_rename()`, `api_config`, `api_config_get`, `api_watcher_toggle`, `api_watcher_save`, `api_shutdown`
+  - These are Flask route functions currently in `gui.py`
+  - Import them back in `gui.py` (or register them via `app.route()` in `create_app()`)
+- Keep `index()`, `_render_page()`, `/health` in `gui.py` as the main page handlers
+- Keep CSRF middleware and `create_app()` in `gui.py` for now
+
+### 1c. Factor CSRF
+- Extract CSRF token generation/validation from `gui.py` to `src/pz_save_manager/csrf.py`
+- Keep `_generate_csrf_token()` and `_validate_csrf()` (or `_check_csrf()`) there
+- Import into gui.py and routes_api.py
+
+## Phase 2: Dependency injection
+
+### 2a. Make config injectable
+- `config.py`: instead of module-level `_cache = {}` with `get()` reading from the singleton, wrap config in a class `ConfigStore`
+- `ConfigStore.__init__(self, path: Path = CONFIG_PATH)` — takes a path, has its own cache
+- Keep a module-level `default_store = ConfigStore()` for backward compat
+- `get(key)` and `set(key, value)` become methods on ConfigStore
+- `_load()` and `_save()` become private methods
+
+### 2b. Make backup manager injectable
+- Currently `get_manager()` returns a module-level singleton with hardcoded paths
+- Change it to accept `config: ConfigStore` and `saves_root: Path, backups_root: Path`
+- `gui.py`: `create_app()` receives a `ConfigStore` and creates a manager with it
+- `cli.py`: `main()` creates a `ConfigStore` and passes it to commands via `ctx.obj`
+
+### 2c. Wire it through CLI and GUI
+- `cli.py`: `@click.pass_context` passes `ctx.obj = {"config": config_store, "manager": manager}`
+- `gui.py`: `create_app(config: ConfigStore)` creates the manager, registers routes with it
+- Routes receive config/manager from the app context or from `create_app()`'s closure
+
+## Phase 3: Service layer extraction
+
+### 3a. Create `backup_service.py`
+- `src/pz_save_manager/backup_service.py`
+- Extract from `gui.py` the orchestration logic:
+  - `restore_save(manager, save_id, backup_ts)` — pause watcher, call manager.restore, resume watcher
+  - `rename_save(manager, save_id, new_name, ...)` — the rollback logic when backup rename fails
+- These are called by route handlers, keep them as plain functions taking explicit dependencies
+
+### 3b. Create `save_service.py`
+- `src/pz_save_manager/save_service.py`
+- Extract from `gui.py`:
+  - `backup_save(manager, save_id)` — the orchestration around manager.create_backup
+
+### 3c. Route handlers become thin
+- After extraction, route handlers should look like:
+  ```python
+  @app.route("/api/restore", methods=["POST"])
+  def api_restore():
+      data = request.get_json()
+      result = restore_save(current_app.config["manager"], data["save"], data["timestamp"])
+      return jsonify(result)
+  ```
+  No watcher pause/unpause, no rollback logic, no cleanup orchestration — just HTTP in/out.
+
+## Constraints
+- Do NOT add new features
+- Do NOT change the public CLI interface (flags, commands, help text)
+- Do NOT change the HTTP API interface (endpoint paths, request/response format)
+- Run tests after each phase: `uv run pytest tests/ -v`
+- If a test breaks because of DI changes, update the test to inject dependencies
+- Keep `pyproject.toml` dependencies unchanged
+- Keep the CSRF token mechanism working (all existing tests must pass)

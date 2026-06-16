@@ -3,12 +3,15 @@
 from pathlib import Path
 
 import pytest
+from flask import Flask
 
-from pz_save_manager.gui import _CSRF_TOKEN, app
+from pz_save_manager.config import ConfigStore
+from pz_save_manager.gui import _CSRF_TOKEN, create_app
+from pz_save_manager.routes_api import _manager as api_manager
 
 
 @pytest.fixture
-def client(tmp_path: Path, monkeypatch):
+def client(tmp_path: Path):
     """Flask test client with test save directories."""
     saves = tmp_path / "Zomboid" / "Saves"
     backups = tmp_path / ".pz-save-manager" / "backups"
@@ -17,11 +20,11 @@ def client(tmp_path: Path, monkeypatch):
     (saves / "Apocalypse" / "test-world" / "sandbox.lua").write_text("return {}")
     (saves / "Apocalypse" / "test-world" / "map").mkdir()
 
-    # Patch where they're imported: saves.py imports from platforms
-    monkeypatch.setattr("pz_save_manager.saves.get_saves_root", lambda: saves)
-    monkeypatch.setattr("pz_save_manager.backup.get_saves_root", lambda: saves)
-    monkeypatch.setattr("pz_save_manager.backup.get_backups_root", lambda: backups)
-
+    app = create_app(
+        ConfigStore(tmp_path / "config.json"),
+        saves_root=saves,
+        backups_root=backups,
+    )
     app.config["TESTING"] = True
     return app.test_client()
 
@@ -35,6 +38,27 @@ def test_index_shows_saves(client):
     assert resp.status_code == 200
     assert b"test-world" in resp.data
     assert b"Apocalypse" in resp.data
+
+
+def test_index_template_is_resolved_by_flask_loader(client):
+    client.application.jinja_env.get_template("index.html")
+
+
+def test_template_is_declared_as_package_data():
+    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+    assert "[tool.setuptools.package-data]" in pyproject
+    assert 'pz_save_manager = ["templates/*.html"]' in pyproject
+
+
+def test_api_manager_fails_closed_without_dependency():
+    app = Flask(__name__)
+    with app.app_context(), pytest.raises(RuntimeError, match="WatcherManager"):
+        api_manager()
+
+
+def test_health_rejects_non_loopback_clients(client):
+    resp = client.get("/health", environ_base={"REMOTE_ADDR": "192.168.1.50"})
+    assert resp.status_code == 403
 
 
 def test_api_backup_creates_backup(client):

@@ -7,6 +7,11 @@ import platform
 from pathlib import Path
 
 
+def resolve_path(path: Path | str | None, default: Path | None = None) -> Path | None:
+    """Expanduser and resolve to Path. Returns default when path is None."""
+    return Path(path).expanduser() if path is not None else default
+
+
 APP_DIR_NAME = ".pz-save-manager"
 ZOMBOID_DIR_NAME = "Zomboid"
 SAVES_DIR_NAME = "Saves"

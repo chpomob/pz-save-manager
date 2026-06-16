@@ -10,16 +10,17 @@ from rich.console import Console
 from rich.table import Table
 
 from .backup import BackupError, BackupNotFound, create_backup, delete_backup, list_backups, restore_backup
-from .gui import run_gui
-from .platforms import get_backups_root, get_saves_root
+from .config import ConfigStore
+from .platforms import get_backups_root, get_saves_root, resolve_path
 from .saves import SaveNotFound, get_save_modified_time, list_saves
+from .watcher import get_manager
 
 
 console = Console()
 
 
 def _path_option(value: str | None) -> Path | None:
-    return Path(value).expanduser() if value else None
+    return resolve_path(value)
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -29,8 +30,18 @@ def _path_option(value: str | None) -> Path | None:
 def main(ctx: click.Context, saves_dir: str | None, backups_dir: str | None) -> None:
     """Manage Project Zomboid save backups."""
     ctx.ensure_object(dict)
-    ctx.obj["saves_root"] = _path_option(saves_dir) or get_saves_root()
-    ctx.obj["backups_root"] = _path_option(backups_dir) or get_backups_root()
+    config_store = ConfigStore()
+    saves_root = _path_option(saves_dir) or get_saves_root()
+    backups_root = _path_option(backups_dir) or config_store.get_backups_dir() or get_backups_root()
+    manager = get_manager(config=config_store, saves_root=saves_root, backups_root=backups_root)
+    ctx.obj.update(
+        {
+            "config": config_store,
+            "manager": manager,
+            "saves_root": saves_root,
+            "backups_root": backups_root,
+        }
+    )
 
 
 @main.command("list")
@@ -64,7 +75,13 @@ def list_saves_command(ctx: click.Context) -> None:
 def backup_command(ctx: click.Context, game_mode: str, save_name: str) -> None:
     """Create a timestamped backup for a save."""
     try:
-        backup = create_backup(game_mode, save_name, saves_root=ctx.obj["saves_root"], backups_root=ctx.obj["backups_root"])
+        backup = create_backup(
+            game_mode,
+            save_name,
+            saves_root=ctx.obj["saves_root"],
+            backups_root=ctx.obj["backups_root"],
+            config=ctx.obj["config"],
+        )
     except (SaveNotFound, BackupError) as exc:
         raise click.ClickException(str(exc)) from exc
     console.print(f"[green]Backup created:[/green] {backup.path}")
@@ -137,46 +154,49 @@ def gui_command(ctx: click.Context, host: str, port: int, no_browser: bool) -> N
     from .gui import run_gui
     saves_root = ctx.obj.get("saves_root")
     backups_root = ctx.obj.get("backups_root")
-    run_gui(host, port, saves_root=saves_root, backups_root=backups_root, open_browser=not no_browser)
+    run_gui(
+        host,
+        port,
+        saves_root=saves_root,
+        backups_root=backups_root,
+        open_browser=not no_browser,
+        config=ctx.obj["config"],
+        manager=ctx.obj["manager"],
+    )
 
 
 @main.command("config")
 @click.argument("key", required=False)
 @click.argument("value", required=False)
-def config_command(key: str | None, value: str | None) -> None:
+@click.pass_context
+def config_command(ctx: click.Context, key: str | None, value: str | None) -> None:
     """View or set configuration. 'pz-saves config' shows all."""
-    from .config import get_all, set_
+    config_store: ConfigStore = ctx.obj["config"]
 
     if key is None:
-        cfg = get_all()
+        cfg = config_store.get_all()
         console.print("[bold]Configuration:[/bold]")
         for k, v in cfg.items():
             console.print(f"  {k}: {v}")
         return
 
     if value is None:
-        from .config import get
-        console.print(f"{key} = {get(key)}")
+        console.print(f"{key} = {config_store.get(key)}")
         return
 
     # Convert types
     try:
-        if key == "debounce_seconds":
-            value = float(value)  # type: ignore
-        elif key == "backup_cooldown_minutes":
-            value = int(value)  # type: ignore
-        elif key == "max_auto_backups":
-            value = int(value)  # type: ignore
-        elif key == "port":
-            value = int(value)  # type: ignore
-        elif key in ("auto_start_watcher",):
-            value = value.lower() in ("true", "1", "yes")  # type: ignore
-        elif key == "backups_dir" and value in ("", "none", "null"):
-            value = None  # type: ignore
+        from .config import _coerce
+        coerced = _coerce(key, value)
+        # _coerce returns None to signal clearing (backups_dir empty/null)
+        if coerced is None and key == "backups_dir":
+            value = None
+        else:
+            value = coerced
     except (ValueError, TypeError) as e:
         raise click.ClickException(f"Invalid value for '{key}': {e}") from e
 
-    set_(key, value)
+    config_store.set(key, value)
     console.print(f"[green]{key} = {value}[/green]")
 
 
@@ -222,13 +242,3 @@ def annotate_command(ctx: click.Context, game_mode: str, save_name: str, timesta
     else:
         set_backup_note(backup.path, note)
         console.print(f"[green]Note saved for[/green] {backup.display_name}")
-
-
-@main.command("install")
-def install_command() -> None:
-    """Create desktop shortcuts and launchers."""
-    from .installer import install
-    install()
-
-
-main.add_command(list_saves_command, "list-saves")

@@ -195,7 +195,7 @@ def test_backup_record_note_property(tmp_path):
     set_backup_note(backup_dir, "Died to a horde")
     assert record.note == "Died to a horde"
 
-    record.set_note("New note via method")
+    set_backup_note(record.path, "New note via method")
     assert get_backup_note(backup_dir) == "New note via method"
 
 

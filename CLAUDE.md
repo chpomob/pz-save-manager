@@ -25,7 +25,7 @@ The tool watches `~/Zomboid/Saves/<GameMode>/<SaveName>/` and writes timestamped
 - `platforms.py` — OS path helpers. `get_backups_root()` reads `config.py`, so importing config inside that function avoids a circular import.
 - `saves.py` — read-only discovery of save directories. `get_save()` is the security boundary: it rejects `..`, `/`, `\` in `game_mode`/`save_name` and is the entry point all backup ops route through.
 - `backup.py` — atomic backup/restore. Key invariants enforced here:
-  - **Atomic backup creation**: `_unique_destination` reserves the destination via `mkdir(exist_ok=False)` (TOCTOU-safe), then `copytree` writes into a sibling temp dir and contents are moved into the reserved destination. Two concurrent backups at the same second get distinct `…-01` suffixes.
+  - **Atomic backup creation**: `_publish_temp_backup` copies into a sibling temp dir, writes a completion marker, then `os.replace(tmp_path, destination)` atomically publishes. A `destination.exists()` pre-check + `FileExistsError`/`ENOTEMPTY` guards handle TOCTOU races. Two concurrent backups at the same second get distinct `…-01` suffixes.
   - **Symlinks are skipped, never followed**, in both `create_backup` and `restore_backup` via the `_skip_symlinks` ignore callback.
   - **Restore stages then renames**: copy → `target.rename(previous_target)` → `temp_target.rename(target)`. Cleanup of `previous_target` is wrapped so a failed `rmtree` cannot lose the restored save — it only logs a warning.
   - Component validation lives in `_validate_component`; reuse it for any new path-accepting API.

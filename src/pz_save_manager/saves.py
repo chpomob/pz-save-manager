@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .platforms import get_saves_root
+from .platforms import get_saves_root, resolve_path
 
 
 class SaveManagerError(Exception):
@@ -27,10 +27,6 @@ class SaveGame:
     @property
     def display_name(self) -> str:
         return f"{self.game_mode}/{self.name}"
-
-
-def _to_root(saves_root: Path | str | None) -> Path:
-    return Path(saves_root).expanduser() if saves_root is not None else get_saves_root()
 
 
 def get_save_modified_time(save: SaveGame) -> float:
@@ -54,7 +50,7 @@ def get_save_modified_time(save: SaveGame) -> float:
 
 def list_game_modes(saves_root: Path | str | None = None) -> list[str]:
     """List available game mode directories."""
-    root = _to_root(saves_root)
+    root = resolve_path(saves_root) or get_saves_root()
     if not root.is_dir():
         return []
     return sorted(
@@ -65,7 +61,7 @@ def list_game_modes(saves_root: Path | str | None = None) -> list[str]:
 
 def list_saves(saves_root: Path | str | None = None) -> list[SaveGame]:
     """Discover saves under Saves/GameMode/SaveName."""
-    root = _to_root(saves_root)
+    root = resolve_path(saves_root) or get_saves_root()
     if not root.is_dir():
         return []
 
@@ -114,9 +110,11 @@ def get_save(game_mode: str, save_name: str, saves_root: Path | str | None = Non
     """Return a specific save or raise SaveNotFound."""
     # P0: prevent path traversal — reject '..', '/', '\\' and null bytes in components
     for val, label in ((game_mode, "game_mode"), (save_name, "save_name")):
-        if ".." in val or "/" in val or "\\" in val or "\x00" in val:
-            raise SaveNotFound(f"Invalid {label}: {val!r}")
-    root = _to_root(saves_root)
+        try:
+            _validate_name(val, label)
+        except SaveManagerError as exc:
+            raise SaveNotFound(str(exc)) from exc
+    root = resolve_path(saves_root) or get_saves_root()
     path = root / game_mode / save_name
     if not path.is_dir():
         raise SaveNotFound(f"Save not found: {game_mode}/{save_name}")
@@ -127,7 +125,11 @@ _SANE_NAME_RE = re.compile(r'^[^/\x00]{1,200}$')
 
 
 def _validate_name(value: str, label: str) -> None:
-    """Reject empty, path-traversal, IP-shaped, or otherwise dangerous names."""
+    """Reject empty, path-traversal, IP-shaped, or otherwise dangerous names.
+
+    The regex (^[^/\x00]{1,200}$) enforces 1-200 chars, no '/' or NUL.
+    Backslash is rejected by the explicit check below.
+    """
     if not value or not value.strip():
         raise SaveManagerError(f"{label} cannot be empty")
     if ".." in value or "/" in value or "\\" in value or "\x00" in value:
@@ -136,8 +138,6 @@ def _validate_name(value: str, label: str) -> None:
         raise SaveManagerError(f"{label} looks like a server address: {value!r}")
     if not _SANE_NAME_RE.match(value):
         raise SaveManagerError(f"Invalid characters in {label}: {value!r}")
-    if len(value.strip()) > 200:
-        raise SaveManagerError(f"{label} is too long (max 200 characters)")
 
 
 def rename_save(
@@ -153,7 +153,7 @@ def rename_save(
     _validate_name(new_name, "new_name")
 
     old = get_save(game_mode, old_name, saves_root=saves_root)
-    root = _to_root(saves_root)
+    root = resolve_path(saves_root) or get_saves_root()
     new_path = root / game_mode / new_name.strip()
     if new_path.exists():
         raise SaveManagerError(f"Cannot rename save to {new_name!r}: Destination already exists: {new_name!r}")
