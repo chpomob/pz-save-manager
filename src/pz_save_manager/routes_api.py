@@ -214,22 +214,24 @@ def api_config():
         "port",
         "auto_start_watcher",
     }
+    pending: dict[str, object] = {}
     errors: dict[str, str] = {}
     for key, value in data.items():
         if key not in allowed:
             continue
         if value is None or value == "":
             if key == "backups_dir":
-                _config_store().set(key, None)
+                pending[key] = None
             continue
         try:
-            coerced_value = _coerce(key, value)
+            pending[key] = _coerce(key, value)
         except (ValueError, TypeError):
             errors[key] = f"Invalid value for {key}"
             continue
-        _config_store().set(key, coerced_value)
     if errors:
         return jsonify({"ok": False, "error": "Invalid values", "fields": errors}), 400
+    for key, value in pending.items():
+        _config_store().set(key, value)
     return jsonify({"ok": True, "message": "Settings saved", "config": _config_store().get_all()})
 
 

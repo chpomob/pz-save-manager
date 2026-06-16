@@ -379,6 +379,8 @@ def prune_auto_backups(
     Manual backups (no .pz-auto marker) are never deleted.  Returns the
     number of auto-backups removed.
     """
+    _validate_component(game_mode, "game mode")
+    _validate_component(save_name, "save name")
     if max_count <= 0:
         return 0
     root = resolve_path(backups_root) or get_backups_root()
