@@ -86,43 +86,58 @@ def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
 
 
 def index():
-    manager = _manager()
-    saves = list_saves(saves_root=_saves_root())
-    save_infos = []
-    for save in saves:
-        try:
-            save_infos.append(_save_info(save, manager))
-        except Exception:
-            import logging
+    try:
+        manager = _manager()
+        saves = list_saves(saves_root=_saves_root())
+        save_infos = []
+        for save in saves:
+            try:
+                save_infos.append(_save_info(save, manager))
+            except Exception:
+                import logging
 
-            logging.getLogger(__name__).warning("could not read save %s", save.display_name, exc_info=True)
-    all_backups = list_backups(backups_root=_backups_root())
-    backup_count = len(all_backups)
-    all_b = []
-    for backup in all_backups[:50]:
-        pi = player_info(backup.path) or {}
-        all_b.append(
-            {
-                "game_mode": backup.game_mode,
-                "save_name": backup.save_name,
-                "real_save_name": backup.save_name,
-                "timestamp": backup.timestamp,
-                "auto": backup.auto,
-                "age": backup.age,
-                "formatted": backup.formatted,
-                "has_thumbnail": (backup.path / "thumb.png").is_file(),
-                "player": pi.get("name"),
-                "player_dead": pi.get("is_dead"),
-                "note": get_backup_note(backup.path),
-            }
+                logging.getLogger(__name__).warning("could not read save %s", save.display_name, exc_info=True)
+        all_backups = list_backups(backups_root=_backups_root())
+        backup_count = len(all_backups)
+        all_b = []
+        for backup in all_backups[:50]:
+            pi = player_info(backup.path) or {}
+            all_b.append(
+                {
+                    "game_mode": backup.game_mode,
+                    "save_name": backup.save_name,
+                    "real_save_name": backup.save_name,
+                    "timestamp": backup.timestamp,
+                    "auto": backup.auto,
+                    "age": backup.age,
+                    "formatted": backup.formatted,
+                    "has_thumbnail": (backup.path / "thumb.png").is_file(),
+                    "player": pi.get("name"),
+                    "player_dead": pi.get("is_dead"),
+                    "note": get_backup_note(backup.path),
+                }
+            )
+        return _render_page(
+            saves=save_infos,
+            all_backups=all_b,
+            backup_count=backup_count,
+            watcher_running=manager.running,
+            csrf_token=_generate_csrf_token(),
         )
-    return _render_page(
-        saves=save_infos,
-        all_backups=all_b,
-        backup_count=backup_count,
-        watcher_running=manager.running,
-        csrf_token=_generate_csrf_token(),
-    )
+    except Exception:
+        from traceback import format_exc
+
+        tb = format_exc()
+        import logging
+
+        logging.getLogger(__name__).error("index page failed:\n%s", tb)
+        return (
+            "<!doctype html><meta charset='utf-8'><style>body{font-family:monospace;background:#111;color:#eee;padding:2rem}pre{white-space:pre-wrap;background:#222;padding:1rem;border-radius:6px;overflow-x:auto}</style>"
+            "<h2>PZ Save Manager — Error</h2>"
+            "<p>The UI failed to load. Check the console for details.</p>"
+            "<p>Try <a href='/health' style='color:#e94560'>/health</a> for diagnostics.</p>"
+            f"<pre>{escape(tb)}</pre>"
+        ), 500
 
 
 def health():
@@ -264,6 +279,7 @@ def run_gui(
     open_browser: bool = True,
     config: ConfigStore | None = None,
     manager: WatcherManager | None = None,
+    debug: bool = False,
 ) -> None:
     import webbrowser
 
@@ -290,4 +306,4 @@ def run_gui(
     print(f"  Diagnostics: {url}/health\n")
     if open_browser:
         webbrowser.open(url)
-    flask_app.run(host=host, port=port, debug=False)
+    flask_app.run(host=host, port=port, debug=debug)

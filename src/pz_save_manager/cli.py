@@ -148,8 +148,9 @@ def delete_command(ctx: click.Context, game_mode: str, save_name: str, timestamp
 @click.option("--host", default="127.0.0.1", help="Host to bind to.")
 @click.option("--port", default=8080, type=int, help="Port to listen on.")
 @click.option("--no-browser", is_flag=True, help="Don't open browser automatically.")
+@click.option("--debug", is_flag=True, help="Enable Flask debug mode (shows tracebacks in browser).")
 @click.pass_context
-def gui_command(ctx: click.Context, host: str, port: int, no_browser: bool) -> None:
+def gui_command(ctx: click.Context, host: str, port: int, no_browser: bool, debug: bool) -> None:
     """Launch the web GUI."""
     from .gui import run_gui
     saves_root = ctx.obj.get("saves_root")
@@ -162,6 +163,7 @@ def gui_command(ctx: click.Context, host: str, port: int, no_browser: bool) -> N
         open_browser=not no_browser,
         config=ctx.obj["config"],
         manager=ctx.obj["manager"],
+        debug=debug,
     )
 
 
