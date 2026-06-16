@@ -217,6 +217,7 @@ class WatcherManager:
         backup_cooldown_seconds: float = 300.0,
         saves_root: Path | str | None = None,
         backups_root: Path | str | None = None,
+        on_backup: callable | None = None,
     ) -> SaveWatcher:
         key = save.display_name
         resolved_saves_root = saves_root if saves_root is not None else self.saves_root
@@ -230,6 +231,7 @@ class WatcherManager:
                     save,
                     debounce_seconds,
                     backup_cooldown_seconds,
+                    on_backup=on_backup,
                     saves_root=resolved_saves_root,
                     backups_root=resolved_backups_root,
                     config=self.config,
@@ -244,6 +246,7 @@ class WatcherManager:
                 save,
                 debounce_seconds,
                 backup_cooldown_seconds,
+                on_backup=on_backup,
                 saves_root=resolved_saves_root,
                 backups_root=resolved_backups_root,
                 config=self.config,

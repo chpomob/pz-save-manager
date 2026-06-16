@@ -18,6 +18,7 @@ def start_watching_saves(
     *,
     saves_root: Path | str | None = None,
     backups_root: Path | str | None = None,
+    on_backup: callable | None = None,
 ) -> int:
     """Watch all discovered saves using the current debounce/cooldown settings."""
     saves = list_saves(saves_root=saves_root)
@@ -31,6 +32,7 @@ def start_watching_saves(
             backup_cooldown_seconds=cooldown,
             saves_root=saves_root,
             backups_root=backups_root,
+            on_backup=on_backup,
         )
     if not manager.running:
         manager.start()

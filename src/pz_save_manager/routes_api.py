@@ -155,6 +155,7 @@ def api_watcher_toggle():
         _config_store(),
         saves_root=_saves_root(),
         backups_root=_backups_root(),
+        on_backup=lambda b: setattr(current_app.config, "last_auto_backup", __import__("time").time()),
     )
     return jsonify({"ok": True, "message": f"Watcher started ({save_count} saves)"})
 
@@ -256,8 +257,12 @@ def api_shutdown():
     return jsonify({"ok": True, "message": "Shutting down..."})
 
 
+def api_backup_last_auto():
+    """Return the Unix timestamp of the most recent auto-backup (0 = never)."""
+    return {"last_auto": current_app.config.get("last_auto_backup", 0.0)}
+
+
 def register_api_routes(app: Flask) -> None:
-    """Register API endpoints on the provided Flask app."""
     app.add_url_rule("/api/backup", "api_backup", api_backup, methods=["POST"])
     app.add_url_rule("/api/restore", "api_restore", api_restore, methods=["POST"])
     app.add_url_rule("/api/backup/delete", "api_delete_backup", api_delete_backup, methods=["POST"])
@@ -267,4 +272,5 @@ def register_api_routes(app: Flask) -> None:
     app.add_url_rule("/api/watcher/save", "api_watcher_save", api_watcher_save, methods=["POST"])
     app.add_url_rule("/api/config", "api_config_get", api_config_get, methods=["GET"])
     app.add_url_rule("/api/config", "api_config", api_config, methods=["POST"])
+    app.add_url_rule("/api/backup/last-auto", "api_backup_last_auto", api_backup_last_auto, methods=["GET"])
     app.add_url_rule("/api/shutdown", "api_shutdown", api_shutdown, methods=["POST"])

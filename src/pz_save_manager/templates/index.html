@@ -175,6 +175,9 @@ function toggleWatch(m,n,b){doAction(b,'/api/watcher/save',{game_mode:m,save_nam
 function toggleSettings(){var o=document.getElementById('settings-overlay');if(o.style.display==='flex'){o.style.display='none'}else{o.style.display='flex';api('GET','/api/config').then(r=>r.json()).then(d=>{document.getElementById('cfg-backups-dir').value=d.backups_dir||'';document.getElementById("cfg-cooldown").value=d.backup_cooldown_minutes;document.getElementById("cfg-max-auto").value=d.max_auto_backups})}}
 function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,backup_cooldown_minutes:document.getElementById("cfg-cooldown").value,max_auto_backups:document.getElementById("cfg-max-auto").value};doAction(null,'/api/config',data,'Settings saved!')}
 function shutdown(){if(!confirm('Close PZ Save Manager?'))return;api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style="text-align:center;padding:4rem;color:#888"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'}).catch(function(){toast('Network error','var(--red)')})}
+// Auto-refresh: poll for new auto-backups every 5 seconds
+var _lastAuto = 0;
+setInterval(function(){api("GET","/api/backup/last-auto").then(function(r){return r.json()}).then(function(d){var t=d.last_auto;if(t>_lastAuto){_lastAuto=t;location.reload()}}).catch(function(){})},5000);
 </script>
 </body>
 </html>

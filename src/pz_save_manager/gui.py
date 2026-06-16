@@ -237,6 +237,12 @@ def create_app(
     flask_app.config["manager"] = watcher_manager
     flask_app.config["_saves_root_override"] = saves_root
     flask_app.config["_backups_root_override"] = resolved_backups_root
+    flask_app.config["last_auto_backup"] = 0.0
+
+    def _on_auto_backup(backup):
+        import time
+        flask_app.config["last_auto_backup"] = time.time()
+
     _register_page_routes(flask_app)
     register_api_routes(flask_app)
     if config_store.get("auto_start_watcher"):
@@ -245,6 +251,7 @@ def create_app(
             config_store,
             saves_root=saves_root,
             backups_root=resolved_backups_root,
+            on_backup=_on_auto_backup,
         )
     return flask_app
 
