@@ -32,6 +32,7 @@ jobs:
           --name pz-save-manager
           --collect-submodules watchdog
           --collect-submodules flask
+          --collect-data pz_save_manager
           --noconfirm
           scripts/pz_save_manager_app.py
 
