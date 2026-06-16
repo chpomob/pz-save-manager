@@ -156,7 +156,12 @@ class SaveWatcher(FileSystemEventHandler):
                         self._timer.daemon = True
                         self._timer.start()
         if backup is not None and callback:
-            callback(backup)
+            try:
+                callback(backup)
+            except Exception:
+                import logging
+
+                logging.getLogger(__name__).error("auto-backup callback failed", exc_info=True)
 
 
 class WatcherManager:

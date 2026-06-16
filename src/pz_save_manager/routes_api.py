@@ -8,6 +8,7 @@ from .backup import BackupError, BackupNotFound, delete_backup, get_backup, set_
 from .backup_service import rename_save, restore_save
 from .config import ConfigStore, default_store
 from .csrf import _check_csrf
+from .gui import make_auto_backup_recorder
 from .save_service import backup_save
 from .saves import SaveNotFound
 from .watcher import WatcherManager
@@ -155,7 +156,7 @@ def api_watcher_toggle():
         _config_store(),
         saves_root=_saves_root(),
         backups_root=_backups_root(),
-        on_backup=lambda b: setattr(current_app.config, "last_auto_backup", __import__("time").time()),
+        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
     )
     return jsonify({"ok": True, "message": f"Watcher started ({save_count} saves)"})
 
@@ -186,6 +187,7 @@ def api_watcher_save():
         backup_cooldown_seconds=cooldown,
         saves_root=_saves_root(),
         backups_root=_backups_root(),
+        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
     )
     if not manager.running:
         manager.start()

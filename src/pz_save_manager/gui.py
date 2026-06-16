@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from html import escape
 from ipaddress import ip_address
@@ -14,7 +15,6 @@ from .config import ConfigStore, default_store
 from .csrf import CSRF_TOKEN as _CSRF_TOKEN
 from .csrf import _generate_csrf_token
 from .platforms import get_backups_root, get_saves_root
-from .routes_api import register_api_routes
 from .save_info import extract_all, player_info
 from .saves import SaveGame, get_save_modified_time, list_saves
 from .watcher import WatcherManager
@@ -45,6 +45,16 @@ def _manager() -> WatcherManager:
     raise RuntimeError("Flask app is missing a WatcherManager dependency")
 
 
+def make_auto_backup_recorder(app: Flask) -> Callable[[object], None]:
+    """Return a callback that records the last auto-backup time on the given app."""
+    import time
+
+    def record(backup: object) -> None:
+        app.config["last_auto_backup"] = time.time()
+
+    return record
+
+
 def _render_page(
     *,
     saves: list[dict],
@@ -61,6 +71,7 @@ def _render_page(
         backup_count=backup_count,
         watcher_running=watcher_running,
         csrf_token=csrf_token,
+        last_auto_backup=current_app.config.get("last_auto_backup", 0.0),
     )
 
 
@@ -253,12 +264,11 @@ def create_app(
     flask_app.config["_saves_root_override"] = saves_root
     flask_app.config["_backups_root_override"] = resolved_backups_root
     flask_app.config["last_auto_backup"] = 0.0
-
-    def _on_auto_backup(backup):
-        import time
-        flask_app.config["last_auto_backup"] = time.time()
+    on_auto_backup = make_auto_backup_recorder(flask_app)
 
     _register_page_routes(flask_app)
+    from .routes_api import register_api_routes
+
     register_api_routes(flask_app)
     if config_store.get("auto_start_watcher"):
         start_watching_saves(
@@ -266,7 +276,7 @@ def create_app(
             config_store,
             saves_root=saves_root,
             backups_root=resolved_backups_root,
-            on_backup=_on_auto_backup,
+            on_backup=on_auto_backup,
         )
     return flask_app
 

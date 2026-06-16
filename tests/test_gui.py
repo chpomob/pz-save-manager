@@ -3,10 +3,10 @@
 from pathlib import Path
 
 import pytest
-from flask import Flask
+from flask import Flask, has_request_context
 
 from pz_save_manager.config import ConfigStore
-from pz_save_manager.gui import _CSRF_TOKEN, create_app
+from pz_save_manager.gui import _CSRF_TOKEN, create_app, make_auto_backup_recorder
 from pz_save_manager.routes_api import _manager as api_manager
 
 
@@ -54,6 +54,18 @@ def test_api_manager_fails_closed_without_dependency():
     app = Flask(__name__)
     with app.app_context(), pytest.raises(RuntimeError, match="WatcherManager"):
         api_manager()
+
+
+def test_auto_backup_recorder_works_outside_request_context():
+    app = Flask(__name__)
+    app.config["last_auto_backup"] = 0.0
+    recorder = make_auto_backup_recorder(app)
+
+    assert not has_request_context()
+
+    recorder(object())
+
+    assert app.config["last_auto_backup"] > 0.0
 
 
 def test_health_rejects_non_loopback_clients(client):

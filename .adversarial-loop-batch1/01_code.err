@@ -1,0 +1,3944 @@
+Reading prompt from stdin...
+OpenAI Codex v0.139.0
+--------
+workdir: /home/chpo/pz-save-manager
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019ed1e6-fd47-7373-8423-d9e57d485bbe
+--------
+user
+You are a Senior Production Developer.
+Mission: write production-ready code. You are methodical: strict types,
+exhaustive error handling, performance, readability, tests included. You do
+not cut corners. If a spec is ambiguous, document your assumptions in comments.
+If file writes are refused, produce the COMPLETE source code inline in
+markdown code blocks — do not wait for permission.
+Style: clean code, defensive, documented.
+
+
+Implement the specification:
+
+# Batch 1: Fix auto-backup callback cluster + auto-refresh loop
+
+Project: /home/chpo/pz-save-manager (Flask app, Python 3.10+, 75 tests in tests/)
+
+## Root Cause (C1)
+The `gui.py` file has a private `_on_auto_backup` closure inside `create_app()` that correctly updates `last_auto_backup`. But `routes_api.py` cannot access it, so `api_watcher_toggle` and `api_watcher_save` reimplement the logic incorrectly (or not at all).
+
+## Fixes required
+
+### 1. Extract shared recorder (C1)
+In `gui.py`, extract `_on_auto_backup` into a module-level function:
+```python
+def make_auto_backup_recorder(app):
+    """Return a callback that records the last auto-backup time on the given app."""
+    import time
+    def record(backup):
+        app.config["last_auto_backup"] = time.time()
+    return record
+```
+Replace the inline closure in `create_app()` (line ~242) with a call to `make_auto_backup_recorder(flask_app)`.
+Export this function so `routes_api.py` can import it.
+
+### 2. Fix api_watcher_toggle callback (A2/B1)
+In `routes_api.py`, `api_watcher_toggle()` line 158 — the lambda is broken:
+```python
+on_backup=lambda b: setattr(current_app.config, "last_auto_backup", __import__("time").time()),
+```
+Replace with:
+```python
+from .gui import make_auto_backup_recorder
+# inside the function:
+on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+```
+Note: use `current_app._get_current_object()` to get the real Flask app object (not the proxy), because the callback runs outside request context in a Timer thread.
+
+### 3. Fix api_watcher_save callback (B2)
+In `routes_api.py`, `api_watcher_save()` line ~183 — `manager.watch()` is called with NO `on_backup` argument. Add the same `on_backup=make_auto_backup_recorder(current_app._get_current_object())` here.
+
+### 4. Fix auto-refresh infinite loop (B3)
+In `templates/index.html`, the JavaScript `_lastAuto` is initialized to 0 on every page load. Once `/api/backup/last-auto` returns any positive timestamp, the first poll triggers a reload, which resets `_lastAuto` to 0, creating an infinite 5-second reload loop.
+
+Fix: pass `last_auto_backup` from the server to the template, and seed `_lastAuto` from it:
+- In `gui.py` `_render_page()`, add `last_auto_backup=current_app.config.get("last_auto_backup", 0.0)`
+- In `index.html`, replace `var _lastAuto = 0;` with `var _lastAuto = {{ last_auto_backup }};`
+
+### 5. Wrap callback invocation in try/except (C2)
+In `watcher.py`, `_do_backup()` line ~158 — `callback(backup)` is called outside the try/except/finally block. If the callback raises (e.g. the RuntimeError from B1), the Timer thread crashes silently.
+
+Move the callback invocation inside the `finally` block's protection, or add a separate try/except around it:
+```python
+if backup is not None and callback:
+    try:
+        callback(backup)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).error("auto-backup callback failed", exc_info=True)
+```
+
+## Verification
+After all changes, run: `.venv/bin/pytest tests/ -x -q`
+All 75 tests must pass. Add a test that verifies `make_auto_backup_recorder` works outside request context (create a Flask app, get the recorder, call it — verify `app.config["last_auto_backup"]` is updated).
+
+## Files to modify
+- src/pz_save_manager/gui.py
+- src/pz_save_manager/routes_api.py
+- src/pz_save_manager/watcher.py
+- src/pz_save_manager/templates/index.html
+
+codex
+I’ll inspect the existing Flask app and tests first so the changes match the current structure, then I’ll patch the callback paths and add the requested regression test.
+exec
+/bin/bash -lc 'rg -n "_on_auto_backup|last_auto_backup|api_watcher_toggle|api_watcher_save|_do_backup|_lastAuto|last-auto" src tests' in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+src/pz_save_manager/watcher.py:99:            self._timer = threading.Timer(self.debounce_seconds, self._do_backup)
+src/pz_save_manager/watcher.py:103:    def _do_backup(self) -> None:
+src/pz_save_manager/watcher.py:155:                        self._timer = threading.Timer(self.debounce_seconds, self._do_backup)
+tests/test_gui.py:124:def test_api_watcher_toggle(client):
+tests/test_adversarial.py:139:        watcher._do_backup()
+src/pz_save_manager/routes_api.py:145:def api_watcher_toggle():
+src/pz_save_manager/routes_api.py:158:        on_backup=lambda b: setattr(current_app.config, "last_auto_backup", __import__("time").time()),
+src/pz_save_manager/routes_api.py:163:def api_watcher_save():
+src/pz_save_manager/routes_api.py:262:    return {"last_auto": current_app.config.get("last_auto_backup", 0.0)}
+src/pz_save_manager/routes_api.py:271:    app.add_url_rule("/api/watcher/toggle", "api_watcher_toggle", api_watcher_toggle, methods=["POST"])
+src/pz_save_manager/routes_api.py:272:    app.add_url_rule("/api/watcher/save", "api_watcher_save", api_watcher_save, methods=["POST"])
+src/pz_save_manager/routes_api.py:275:    app.add_url_rule("/api/backup/last-auto", "api_backup_last_auto", api_backup_last_auto, methods=["GET"])
+src/pz_save_manager/templates/index.html:179:var _lastAuto = 0;
+src/pz_save_manager/templates/index.html:180:setInterval(function(){api("GET","/api/backup/last-auto").then(function(r){return r.json()}).then(function(d){var t=d.last_auto;if(t>_lastAuto){_lastAuto=t;location.reload()}}).catch(function(){})},5000);
+src/pz_save_manager/gui.py:255:    flask_app.config["last_auto_backup"] = 0.0
+src/pz_save_manager/gui.py:257:    def _on_auto_backup(backup):
+src/pz_save_manager/gui.py:259:        flask_app.config["last_auto_backup"] = time.time()
+src/pz_save_manager/gui.py:269:            on_backup=_on_auto_backup,
+
+exec
+/bin/bash -lc 'rg --files tests src/pz_save_manager | sort' in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+src/pz_save_manager/__init__.py
+src/pz_save_manager/backup.py
+src/pz_save_manager/backup_service.py
+src/pz_save_manager/cli.py
+src/pz_save_manager/config.py
+src/pz_save_manager/csrf.py
+src/pz_save_manager/gui.py
+src/pz_save_manager/platforms.py
+src/pz_save_manager/routes_api.py
+src/pz_save_manager/save_info.py
+src/pz_save_manager/save_service.py
+src/pz_save_manager/saves.py
+src/pz_save_manager/templates/index.html
+src/pz_save_manager/watcher.py
+src/pz_save_manager/watcher_service.py
+tests/conftest.py
+tests/test_adversarial.py
+tests/test_backup.py
+tests/test_cli.py
+tests/test_config.py
+tests/test_gui.py
+tests/test_platforms.py
+tests/test_rename.py
+tests/test_save_info.py
+tests/test_saves.py
+tests/test_watcher.py
+
+codex
+I found the duplicated recorder logic and the polling script location. Next I’m reading the relevant functions and nearby tests before making the edits.
+exec
+/bin/bash -lc "sed -n '1,340p' src/pz_save_manager/gui.py" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+"""Flask web GUI for PZ Save Manager."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from html import escape
+from ipaddress import ip_address
+from pathlib import Path
+
+from flask import Flask, abort, current_app, render_template, request, send_file
+
+from .backup import get_backup, get_backup_note, list_backups
+from .config import ConfigStore, default_store
+from .csrf import CSRF_TOKEN as _CSRF_TOKEN
+from .csrf import _generate_csrf_token
+from .platforms import get_backups_root, get_saves_root
+from .routes_api import register_api_routes
+from .save_info import extract_all, player_info
+from .saves import SaveGame, get_save_modified_time, list_saves
+from .watcher import WatcherManager
+from .watcher_service import start_watching_saves
+
+
+def _saves_root() -> Path | None:
+    """Return the Flask-configured saves root override, or None for default."""
+    return current_app.config.get("_saves_root_override")
+
+
+def _backups_root() -> Path | None:
+    """Return the Flask-configured backups root override, or None for default."""
+    return current_app.config.get("_backups_root_override")
+
+
+def _config_store() -> ConfigStore:
+    store = current_app.config.get("config_store")
+    if isinstance(store, ConfigStore):
+        return store
+    return default_store
+
+
+def _manager() -> WatcherManager:
+    manager = current_app.config.get("manager")
+    if isinstance(manager, WatcherManager):
+        return manager
+    raise RuntimeError("Flask app is missing a WatcherManager dependency")
+
+
+def _render_page(
+    *,
+    saves: list[dict],
+    all_backups: list[dict],
+    backup_count: int,
+    watcher_running: bool,
+    csrf_token: str,
+) -> str:
+    """Render the main page from the extracted package template."""
+    return render_template(
+        "index.html",
+        saves=saves,
+        all_backups=all_backups,
+        backup_count=backup_count,
+        watcher_running=watcher_running,
+        csrf_token=csrf_token,
+    )
+
+
+def _save_info(save: SaveGame, manager: WatcherManager) -> dict:
+    path = save.path
+    modified = datetime.fromtimestamp(get_save_modified_time(save)).strftime("%Y-%m-%d %H:%M")
+    extra = extract_all(path)
+    info = {
+        "game_mode": save.game_mode,
+        "name": save.name,
+        "full_name": save.name,
+        "modified": modified,
+        "has_thumbnail": extra.get("has_thumbnail", False),
+        "watched": save.display_name in manager.watched_saves(),
+    }
+    info["player_dead"] = None
+    info["player_x"] = None
+    info["player_y"] = None
+    for key in ("mod_count", "player", "player_dead", "player_x", "player_y", "player_world_version"):
+        if key in extra:
+            info[key] = extra[key]
+    return info
+
+
+def index():
+    try:
+        manager = _manager()
+        saves = list_saves(saves_root=_saves_root())
+        save_infos = []
+        for save in saves:
+            try:
+                save_infos.append(_save_info(save, manager))
+            except Exception:
+                import logging
+
+                logging.getLogger(__name__).warning("could not read save %s", save.display_name, exc_info=True)
+        all_backups = list_backups(backups_root=_backups_root())
+        backup_count = len(all_backups)
+        all_b = []
+        for backup in all_backups[:50]:
+            pi = player_info(backup.path) or {}
+            all_b.append(
+                {
+                    "game_mode": backup.game_mode,
+                    "save_name": backup.save_name,
+                    "real_save_name": backup.save_name,
+                    "timestamp": backup.timestamp,
+                    "auto": backup.auto,
+                    "age": backup.age,
+                    "formatted": backup.formatted,
+                    "has_thumbnail": (backup.path / "thumb.png").is_file(),
+                    "player": pi.get("name"),
+                    "player_dead": pi.get("is_dead"),
+                    "note": get_backup_note(backup.path),
+                }
+            )
+        return _render_page(
+            saves=save_infos,
+            all_backups=all_b,
+            backup_count=backup_count,
+            watcher_running=manager.running,
+            csrf_token=_generate_csrf_token(),
+        )
+    except Exception:
+        from traceback import format_exc
+
+        tb = format_exc()
+        import logging
+
+        logging.getLogger(__name__).error("index page failed:\n%s", tb)
+        return (
+            "<!doctype html><meta charset='utf-8'><style>body{font-family:monospace;background:#111;color:#eee;padding:2rem}pre{white-space:pre-wrap;background:#222;padding:1rem;border-radius:6px;overflow-x:auto}</style>"
+            "<h2>PZ Save Manager — Error</h2>"
+            "<p>The UI failed to load. Check the console for details.</p>"
+            "<p>Try <a href='/health' style='color:#e94560'>/health</a> for diagnostics.</p>"
+            f"<pre>{escape(tb)}</pre>"
+        ), 500
+
+
+def health():
+    """Plain-text diagnostic page with resolved paths and discovery status."""
+    import json
+    import platform as _platform
+    import sys
+
+    from . import __version__
+
+    try:
+        if not ip_address(request.remote_addr or "").is_loopback:
+            abort(403)
+    except ValueError:
+        abort(403)
+
+    saves_root = _saves_root() or get_saves_root()
+    backups_root = _backups_root() or get_backups_root()
+    info: dict = {
+        "version": __version__,
+        "python": sys.version,
+        "executable": sys.executable,
+        "platform": _platform.platform(),
+        "frozen": getattr(sys, "frozen", False),
+        "saves_root": str(saves_root),
+        "saves_root_exists": saves_root.is_dir(),
+        "backups_root": str(backups_root),
+        "backups_root_exists": backups_root.is_dir(),
+        "errors": [],
+    }
+    try:
+        saves = list_saves(saves_root=_saves_root())
+        info["save_count"] = len(saves)
+        info["saves"] = [{"game_mode": save.game_mode, "name": save.name, "path": str(save.path)} for save in saves]
+    except Exception as exc:
+        info["errors"].append(f"list_saves: {exc!r}")
+    try:
+        info["backup_count"] = len(list_backups(backups_root=_backups_root()))
+    except Exception as exc:
+        info["errors"].append(f"list_backups: {exc!r}")
+    if saves_root.is_dir():
+        try:
+            info["saves_root_children"] = sorted(path.name for path in saves_root.iterdir())
+        except Exception as exc:
+            info["errors"].append(f"iterdir saves_root: {exc!r}")
+
+    return (
+        "<!doctype html><meta charset='utf-8'>"
+        "<style>body{font-family:monospace;background:#111;color:#eee;padding:2rem}"
+        "pre{white-space:pre-wrap;background:#222;padding:1rem;border-radius:6px}</style>"
+        "<h2>PZ Save Manager — /health</h2>"
+        f"<pre>{escape(json.dumps(info, indent=2, default=str))}</pre>"
+    )
+
+
+def serve_backup_thumbnail(game_mode: str, save_name: str, timestamp: str):
+    try:
+        backup = get_backup(game_mode, save_name, timestamp, backups_root=_backups_root())
+        thumb = backup.path / "thumb.png"
+        if thumb.is_file():
+            return send_file(thumb, mimetype="image/png")
+    except Exception:
+        pass
+    return "", 404
+
+
+def serve_thumbnail(game_mode: str, save_name: str):
+    from .saves import get_save
+
+    try:
+        save = get_save(game_mode, save_name, saves_root=_saves_root())
+        thumb = save.path / "thumb.png"
+        if thumb.is_file():
+            return send_file(thumb, mimetype="image/png")
+    except Exception:
+        pass
+    return "", 404
+
+
+def _register_page_routes(flask_app: Flask) -> None:
+    flask_app.add_url_rule("/", "index", index)
+    flask_app.add_url_rule("/health", "health", health)
+    flask_app.add_url_rule(
+        "/thumb-backup/<game_mode>/<save_name>/<timestamp>",
+        "serve_backup_thumbnail",
+        serve_backup_thumbnail,
+    )
+    flask_app.add_url_rule("/thumb/<game_mode>/<save_name>", "serve_thumbnail", serve_thumbnail)
+
+
+def create_app(
+    config: ConfigStore | None = None,
+    *,
+    saves_root: Path | None = None,
+    backups_root: Path | None = None,
+    manager: WatcherManager | None = None,
+) -> Flask:
+    """Create a Flask GUI app with explicit runtime dependencies."""
+    config_store = config or default_store
+    resolved_backups_root = backups_root
+    if resolved_backups_root is None:
+        configured_backups_dir = config_store.get_backups_dir()
+        if configured_backups_dir is not None:
+            resolved_backups_root = configured_backups_dir
+    watcher_manager = manager or WatcherManager(
+        config=config_store,
+        saves_root=saves_root,
+        backups_root=resolved_backups_root,
+    )
+    flask_app = Flask(__name__, template_folder="templates")
+    flask_app.config["config_store"] = config_store
+    flask_app.config["manager"] = watcher_manager
+    flask_app.config["_saves_root_override"] = saves_root
+    flask_app.config["_backups_root_override"] = resolved_backups_root
+    flask_app.config["last_auto_backup"] = 0.0
+
+    def _on_auto_backup(backup):
+        import time
+        flask_app.config["last_auto_backup"] = time.time()
+
+    _register_page_routes(flask_app)
+    register_api_routes(flask_app)
+    if config_store.get("auto_start_watcher"):
+        start_watching_saves(
+            watcher_manager,
+            config_store,
+            saves_root=saves_root,
+            backups_root=resolved_backups_root,
+            on_backup=_on_auto_backup,
+        )
+    return flask_app
+
+
+def run_gui(
+    host: str = "127.0.0.1",
+    port: int = 8080,
+    saves_root: Path | None = None,
+    backups_root: Path | None = None,
+    open_browser: bool = True,
+    config: ConfigStore | None = None,
+    manager: WatcherManager | None = None,
+    debug: bool = False,
+) -> None:
+    import webbrowser
+
+    url = f"http://{host}:{port}"
+    config_store = config or default_store
+    if saves_root is None:
+        saves_root = get_saves_root()
+    if backups_root is None:
+        backups_root = config_store.get_backups_dir() or get_backups_root()
+    flask_app = create_app(
+        config_store,
+        saves_root=saves_root,
+        backups_root=backups_root,
+        manager=manager,
+    )
+    try:
+        save_count = len(list_saves(saves_root=saves_root))
+    except Exception as exc:
+        save_count = f"error: {exc!r}"
+    print(f"\n  PZ Save Manager - {url}")
+    print(f"  Saves dir : {saves_root} (exists={saves_root.is_dir()})")
+    print(f"  Backups   : {backups_root}")
+    print(f"  Found     : {save_count} save(s)")
+    print(f"  Diagnostics: {url}/health\n")
+    if open_browser:
+        webbrowser.open(url)
+    flask_app.run(host=host, port=port, debug=debug)
+
+exec
+/bin/bash -lc "sed -n '1,340p' src/pz_save_manager/routes_api.py" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+"""HTTP API route handlers for the Flask GUI."""
+
+from __future__ import annotations
+
+from flask import Flask, current_app, jsonify, request
+
+from .backup import BackupError, BackupNotFound, delete_backup, get_backup, set_backup_note
+from .backup_service import rename_save, restore_save
+from .config import ConfigStore, default_store
+from .csrf import _check_csrf
+from .save_service import backup_save
+from .saves import SaveNotFound
+from .watcher import WatcherManager
+from .watcher_service import start_watching_saves
+
+
+def _saves_root():
+    """Return the Flask-configured saves root override, or None for default."""
+    return current_app.config.get("_saves_root_override")
+
+
+def _backups_root():
+    """Return the Flask-configured backups root override, or None for default."""
+    return current_app.config.get("_backups_root_override")
+
+
+def _config_store() -> ConfigStore:
+    store = current_app.config.get("config_store")
+    if isinstance(store, ConfigStore):
+        return store
+    return default_store
+
+
+def _manager() -> WatcherManager:
+    manager = current_app.config.get("manager")
+    if isinstance(manager, WatcherManager):
+        return manager
+    raise RuntimeError("Flask app is missing a WatcherManager dependency")
+
+
+def _need(data: dict | None, *keys: str):
+    """Return (data, None) if all keys present, else (None, error_response)."""
+    if not isinstance(data, dict) or not all(k in data and data[k] for k in keys):
+        return None, (jsonify({"ok": False, "error": f"Missing fields: {', '.join(keys)}"}), 400)
+    return data, None
+
+
+def api_backup():
+    csrf_err = _check_csrf()
+    if csrf_err:
+        return csrf_err
+    data, err = _need(request.get_json(silent=True), "game_mode", "save_name")
+    if err:
+        return err
+    try:
+        result = backup_save(
+            data["game_mode"],
+            data["save_name"],
+            saves_root=_saves_root(),
+            backups_root=_backups_root(),
+            config=_config_store(),
+        )
+        return jsonify(result)
+    except (SaveNotFound, BackupError) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+
+def api_restore():
+    csrf_err = _check_csrf()
+    if csrf_err:
+        return csrf_err
+    data, err = _need(request.get_json(silent=True), "game_mode", "save_name", "timestamp")
+    if err:
+        return err
+    try:
+        result = restore_save(
+            _manager(),
+            data["game_mode"],
+            data["save_name"],
+            data["timestamp"],
+            saves_root=_saves_root(),
+            backups_root=_backups_root(),
+        )
+        return jsonify(result)
+    except (BackupNotFound, BackupError) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+
+def api_delete_backup():
+    csrf_err = _check_csrf()
+    if csrf_err:
+        return csrf_err
+    data, err = _need(request.get_json(silent=True), "game_mode", "save_name", "timestamp")
+    if err:
+        return err
+    try:
+        delete_backup(data["game_mode"], data["save_name"], data["timestamp"], backups_root=_backups_root())
+        return jsonify({"ok": True, "message": "Backup deleted"})
+    except (BackupNotFound, BackupError) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+
+def api_rename():
+    csrf_err = _check_csrf()
+    if csrf_err:
+        return csrf_err
+    data, err = _need(request.get_json(silent=True), "game_mode", "old_name", "new_name")
+    if err:
+        return err
+    from .saves import SaveManagerError
+
+    try:
+        result = rename_save(
+            _manager(),
+            data["game_mode"],
+            data["old_name"],
+            data["new_name"],
+            saves_root=_saves_root(),
+            backups_root=_backups_root(),
+        )
+    except (SaveManagerError, BackupError, SaveNotFound) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify(result)
+
+
+api_rename_save = api_rename
+
+
+def api_annotate_backup():
+    csrf_err = _check_csrf()
+    if csrf_err:
+        return csrf_err
+    data, err = _need(request.get_json(silent=True), "game_mode", "save_name", "timestamp")
+    if err:
+        return err
+    note = (data or {}).get("note", "")
+    try:
+        backup = get_backup(data["game_mode"], data["save_name"], data["timestamp"], backups_root=_backups_root())
+        set_backup_note(backup.path, note)
+    except (BackupNotFound, BackupError) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True, "message": "Note saved" if note else "Note removed"})
+
+
+def api_watcher_toggle():
+    csrf_err = _check_csrf()
+    if csrf_err:
+        return csrf_err
+    manager = _manager()
+    if manager.running:
+        manager.stop()
+        return jsonify({"ok": True, "message": "Watcher stopped"})
+    save_count = start_watching_saves(
+        manager,
+        _config_store(),
+        saves_root=_saves_root(),
+        backups_root=_backups_root(),
+        on_backup=lambda b: setattr(current_app.config, "last_auto_backup", __import__("time").time()),
+    )
+    return jsonify({"ok": True, "message": f"Watcher started ({save_count} saves)"})
+
+
+def api_watcher_save():
+    csrf_err = _check_csrf()
+    if csrf_err:
+        return csrf_err
+    data, err = _need(request.get_json(silent=True), "game_mode", "save_name")
+    if err:
+        return err
+    from .saves import get_save
+
+    try:
+        save = get_save(data["game_mode"], data["save_name"], saves_root=_saves_root())
+    except SaveNotFound:
+        return jsonify({"ok": False, "error": "Save not found"}), 404
+    manager = _manager()
+    if save.display_name in manager.watched_saves():
+        manager.unwatch(save)
+        return jsonify({"ok": True, "message": f"Unwatched {save.name}"})
+    cfg = _config_store().get_all()
+    cooldown = cfg.get("backup_cooldown_minutes", 5) * 60
+    debounce = cfg.get("debounce_seconds", 5.0)
+    manager.watch(
+        save,
+        debounce_seconds=debounce,
+        backup_cooldown_seconds=cooldown,
+        saves_root=_saves_root(),
+        backups_root=_backups_root(),
+    )
+    if not manager.running:
+        manager.start()
+    return jsonify({"ok": True, "message": f"Watching {save.name}"})
+
+
+def api_config_get():
+    return jsonify(_config_store().get_all())
+
+
+def api_config():
+    """Update configuration."""
+    csrf_err = _check_csrf()
+    if csrf_err:
+        return csrf_err
+    data = request.get_json(silent=True) or {}
+    from .config import _coerce
+
+    allowed = {
+        "backups_dir",
+        "debounce_seconds",
+        "backup_cooldown_minutes",
+        "max_auto_backups",
+        "port",
+        "auto_start_watcher",
+    }
+    errors: dict[str, str] = {}
+    for key, value in data.items():
+        if key not in allowed:
+            continue
+        if value is None or value == "":
+            if key == "backups_dir":
+                _config_store().set(key, None)
+            continue
+        try:
+            coerced_value = _coerce(key, value)
+        except (ValueError, TypeError):
+            errors[key] = f"Invalid value for {key}"
+            continue
+        _config_store().set(key, coerced_value)
+    if errors:
+        return jsonify({"ok": False, "error": "Invalid values", "fields": errors}), 400
+    return jsonify({"ok": True, "message": "Settings saved", "config": _config_store().get_all()})
+
+
+def api_shutdown():
+    """Gracefully stop the server."""
+    csrf_err = _check_csrf()
+    if csrf_err:
+        return csrf_err
+    manager = _manager()
+    if manager.running:
+        manager.stop()
+    shutdown_func = request.environ.get("werkzeug.server.shutdown")
+
+    def _shutdown() -> None:
+        if callable(shutdown_func):
+            shutdown_func()
+            return
+        import _thread
+
+        _thread.interrupt_main()
+
+    from threading import Timer
+
+    timer = Timer(3.0, _shutdown)
+    timer.daemon = True
+    timer.start()
+    return jsonify({"ok": True, "message": "Shutting down..."})
+
+
+def api_backup_last_auto():
+    """Return the Unix timestamp of the most recent auto-backup (0 = never)."""
+    return {"last_auto": current_app.config.get("last_auto_backup", 0.0)}
+
+
+def register_api_routes(app: Flask) -> None:
+    app.add_url_rule("/api/backup", "api_backup", api_backup, methods=["POST"])
+    app.add_url_rule("/api/restore", "api_restore", api_restore, methods=["POST"])
+    app.add_url_rule("/api/backup/delete", "api_delete_backup", api_delete_backup, methods=["POST"])
+    app.add_url_rule("/api/save/rename", "api_rename", api_rename, methods=["POST"])
+    app.add_url_rule("/api/backup/annotate", "api_annotate_backup", api_annotate_backup, methods=["POST"])
+    app.add_url_rule("/api/watcher/toggle", "api_watcher_toggle", api_watcher_toggle, methods=["POST"])
+    app.add_url_rule("/api/watcher/save", "api_watcher_save", api_watcher_save, methods=["POST"])
+    app.add_url_rule("/api/config", "api_config_get", api_config_get, methods=["GET"])
+    app.add_url_rule("/api/config", "api_config", api_config, methods=["POST"])
+    app.add_url_rule("/api/backup/last-auto", "api_backup_last_auto", api_backup_last_auto, methods=["GET"])
+    app.add_url_rule("/api/shutdown", "api_shutdown", api_shutdown, methods=["POST"])
+
+exec
+/bin/bash -lc "sed -n '140,210p' src/pz_save_manager/templates/index.html" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+<div id="toast" class="toast" style="display:none"></div>
+<div id="settings-overlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);z-index:100;justify-content:center;align-items:center" onclick="if(event.target===this)toggleSettings()">
+<div style="background:var(--surface);padding:2rem;border-radius:var(--radius);max-width:450px;width:90%;border:1px solid var(--accent)">
+<h3 style="margin-bottom:1rem">⚙ Settings</h3>
+<div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted)">Backup directory <span class="help" title="Where backups are stored. Default: ~/.pz-save-manager/backups">?</span></label>
+<input id="cfg-backups-dir" style="width:100%;padding:.5rem;margin-top:.3rem;background:var(--bg);border:1px solid var(--accent2);color:var(--text);border-radius:6px" placeholder="Default: ~/.pz-save-manager/backups"></div>
+<div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted)">Min interval between backups (minutes) <span class="help" title="After an auto-backup, the watcher waits at least this long before making another one. Prevents backup spam during intense gameplay.">?</span></label>
+<input id="cfg-cooldown" type="number" step="1" min="0" max="1440" style="width:100%;padding:.5rem;margin-top:.3rem;background:var(--bg);border:1px solid var(--accent2);color:var(--text);border-radius:6px"></div>
+<div style="margin-bottom:1rem"><label style="font-size:.85rem;color:var(--muted)">Max auto-backups per save <span class="help" title="Maximum number of automatic backups kept per save. Oldest auto-backups are deleted when this limit is reached. Manual backups are never pruned.">?</span></label>
+<input id="cfg-max-auto" type="number" step="1" min="1" max="999" style="width:100%;padding:.5rem;margin-top:.3rem;background:var(--bg);border:1px solid var(--accent2);color:var(--text);border-radius:6px"></div>
+<div style="display:flex;gap:.5rem;justify-content:flex-end">
+<button class="btn btn-sm" style="background:var(--accent2);color:var(--text)" onclick="toggleSettings()">Cancel</button>
+<button class="btn btn-sm btn-green" onclick="saveSettings()">Save</button>
+</div>
+</div>
+</div>
+<meta name="csrf-token" content="{{ csrf_token }}">
+<script>
+function toast(m,c){var t=document.getElementById('toast');t.textContent=m;t.style.background=c||'var(--green)';t.style.display='block';setTimeout(function(){t.style.display='none'},2500)}
+var csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+function api(m,u,b){return fetch(u,{method:m,headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},body:b?JSON.stringify(b):undefined})}
+function doAction(b,url,body,okMsg){
+  if(b)b.disabled=true;
+  return api('POST',url,body).then(r=>r.json()).then(d=>{
+    if(d.ok){toast(okMsg||d.message||'OK');setTimeout(function(){location.reload()},600)}
+    else{toast(d.error||d.message||'Error','var(--red)');if(b)b.disabled=false}
+  }).catch(function(){toast('Network error','var(--red)');if(b)b.disabled=false})
+}
+function backup(m,n,b){doAction(b,'/api/backup',{game_mode:m,save_name:n},'Backup created!')}
+function restore(m,n,t,b){if(!confirm('Restore '+m+'/'+n+' from '+t+'?'))return;doAction(b,'/api/restore',{game_mode:m,save_name:n,timestamp:t},'Restored!')}
+function deleteBackup(m,n,t,b){if(!confirm('Delete backup '+t+'?'))return;doAction(b,'/api/backup/delete',{game_mode:m,save_name:n,timestamp:t},'Deleted!')}
+function toggleWatcher(){doAction(null,'/api/watcher/toggle',null)}
+function renameSave(m,n,b){var name=prompt('New name for '+n+':');if(!name||name.trim()===''||name.trim()===n)return;doAction(b,'/api/save/rename',{game_mode:m,old_name:n,new_name:name.trim()},'Renamed to '+name.trim()+'!')}
+function annotate(m,n,t,b){var note=prompt('Note for '+t+' (empty to remove):');if(note===null)return;doAction(b,'/api/backup/annotate',{game_mode:m,save_name:n,timestamp:t,note:note},note?'Note saved':'Note removed')}
+function toggleWatch(m,n,b){doAction(b,'/api/watcher/save',{game_mode:m,save_name:n})}
+function toggleSettings(){var o=document.getElementById('settings-overlay');if(o.style.display==='flex'){o.style.display='none'}else{o.style.display='flex';api('GET','/api/config').then(r=>r.json()).then(d=>{document.getElementById('cfg-backups-dir').value=d.backups_dir||'';document.getElementById("cfg-cooldown").value=d.backup_cooldown_minutes;document.getElementById("cfg-max-auto").value=d.max_auto_backups})}}
+function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,backup_cooldown_minutes:document.getElementById("cfg-cooldown").value,max_auto_backups:document.getElementById("cfg-max-auto").value};doAction(null,'/api/config',data,'Settings saved!')}
+function shutdown(){if(!confirm('Close PZ Save Manager?'))return;api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style="text-align:center;padding:4rem;color:#888"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'}).catch(function(){toast('Network error','var(--red)')})}
+// Auto-refresh: poll for new auto-backups every 5 seconds
+var _lastAuto = 0;
+setInterval(function(){api("GET","/api/backup/last-auto").then(function(r){return r.json()}).then(function(d){var t=d.last_auto;if(t>_lastAuto){_lastAuto=t;location.reload()}}).catch(function(){})},5000);
+</script>
+</body>
+</html>
+
+exec
+/bin/bash -lc "sed -n '1,240p' src/pz_save_manager/watcher.py" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+"""File watcher for automatic save backups using watchdog."""
+
+from __future__ import annotations
+
+import threading
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+
+from .backup import BackupRecord, create_backup
+from .saves import SaveGame
+
+if TYPE_CHECKING:
+    from .config import ConfigStore
+
+
+class SaveWatcher(FileSystemEventHandler):
+    """Watches a save directory and creates backups after changes settle."""
+
+    def __init__(
+        self,
+        save: SaveGame,
+        debounce_seconds: float = 5.0,
+        backup_cooldown_seconds: float = 300.0,
+        on_backup: callable | None = None,
+        saves_root: Path | str | None = None,
+        backups_root: Path | str | None = None,
+        config: "ConfigStore | None" = None,
+    ) -> None:
+        self.save = save
+        self.debounce_seconds = debounce_seconds
+        self.backup_cooldown_seconds = backup_cooldown_seconds
+        self.on_backup = on_backup
+        self.saves_root = saves_root
+        self.backups_root = backups_root
+        self.config = config
+        self._last_event = 0.0
+        self._timer: threading.Timer | None = None
+        self._lock = threading.Lock()
+        self._backups: list[BackupRecord] = []
+        self._ignore_until = 0.0  # epoch seconds; events before this are dropped
+        self._last_backup_time = 0.0  # epoch seconds of last auto-backup
+        self._last_backup_mtime = 0.0  # save mtime at time of last backup
+        self._in_progress: bool = False
+        self._pending_backup: bool = False
+
+    def pause(self) -> None:
+        """Suppress all events until resume() is called.
+
+        Used during operations that legitimately rewrite the save dir
+        (e.g. restore_backup), so the watcher doesn't immediately back
+        up the just-restored content. Any pending debounce timer is
+        cancelled.
+        """
+        with self._lock:
+            self._ignore_until = float("inf")
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+
+    def cancel_pending(self) -> None:
+        """Cancel any pending debounce backup."""
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+
+    def wait_idle(self, timeout: float = 30.0) -> bool:
+        """Wait until no backup is running or queued for this watcher."""
+        deadline = time.time() + timeout
+        while True:
+            with self._lock:
+                if not self._in_progress and self._timer is None:
+                    return True
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.05)
+
+    def resume(self, grace_seconds: float = 1.0) -> None:
+        """Re-enable events, with a short grace window for in-flight
+        watchdog events from the paused operation to drain."""
+        with self._lock:
+            self._ignore_until = time.time() + grace_seconds
+
+    def on_modified(self, event) -> None:
+        if event.is_directory:
+            return
+        now = time.time()
+        with self._lock:
+            if now < self._ignore_until:
+                return
+            self._last_event = now
+            if self._timer is not None:
+                self._timer.cancel()
+            self._timer = threading.Timer(self.debounce_seconds, self._do_backup)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def _do_backup(self) -> None:
+        now = time.time()
+        from .saves import get_save_modified_time
+        backup: BackupRecord | None = None
+        callback = None
+        started_backup = False
+        try:
+            with self._lock:
+                self._timer = None
+                if self._in_progress:
+                    self._pending_backup = True
+                    return
+                # Enforce cooldown: skip if the last auto-backup was too recent.
+                if now - self._last_backup_time < self.backup_cooldown_seconds:
+                    return
+                # Skip if the save hasn't actually changed since the last backup.
+                # On Windows, watchdog can fire on spurious events (AV, indexing,
+                # attribute changes). We guard against this by comparing mtims.
+                try:
+                    current_mtime = get_save_modified_time(self.save)
+                except OSError:
+                    return
+                if current_mtime <= self._last_backup_mtime:
+                    return
+                self._in_progress = True
+                started_backup = True
+                callback = self.on_backup
+
+            backup = create_backup(
+                self.save.game_mode,
+                self.save.name,
+                auto=True,
+                saves_root=self.saves_root,
+                backups_root=self.backups_root,
+                config=self.config,
+            )
+
+            with self._lock:
+                self._backups.append(backup)
+                self._last_backup_time = now
+                self._last_backup_mtime = current_mtime
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error("Auto-backup failed for %s/%s: %s", self.save.game_mode, self.save.name, e, exc_info=True)
+            return
+        finally:
+            if started_backup:
+                with self._lock:
+                    self._in_progress = False
+                    if self._pending_backup:
+                        self._pending_backup = False
+                        self._timer = threading.Timer(self.debounce_seconds, self._do_backup)
+                        self._timer.daemon = True
+                        self._timer.start()
+        if backup is not None and callback:
+            callback(backup)
+
+
+class WatcherManager:
+    """Manages multiple SaveWatcher instances."""
+
+    def __init__(
+        self,
+        config: "ConfigStore | None" = None,
+        saves_root: Path | str | None = None,
+        backups_root: Path | str | None = None,
+    ) -> None:
+        self.config = config
+        self.saves_root = saves_root
+        self.backups_root = backups_root
+        self._lock = threading.Lock()
+        self._observer = Observer()
+        self._watchers: dict[str, SaveWatcher] = {}
+        self._watches: dict[str, object] = {}  # Observer watches, used with unschedule
+        self._running = False
+
+    @property
+    def running(self) -> bool:
+        with self._lock:
+            return self._running
+
+    def start(self) -> None:
+        with self._lock:
+            if self._running:
+                return
+            if not self._observer.is_alive():
+                self._observer = Observer()
+                # Re-schedule all watched saves
+                watcher_items = list(self._watchers.items())
+                for key, watcher in watcher_items:
+                    save = watcher.save
+                    handle = self._observer.schedule(watcher, str(save.path), recursive=True)
+                    self._watches[key] = handle
+            self._observer.start()
+            self._running = True
+
+    def stop(self, timeout: float = 30.0) -> None:
+        with self._lock:
+            watchers = list(self._watchers.values())
+            for watcher in watchers:
+                watcher.cancel_pending()
+            if self._running:
+                self._observer.stop()
+                self._observer.join(timeout=5)
+                self._running = False
+        deadline = time.time() + timeout
+        for watcher in watchers:
+            watcher.wait_idle(max(0.0, deadline - time.time()))
+
+    def watch(
+        self,
+        save: SaveGame,
+        debounce_seconds: float = 5.0,
+        backup_cooldown_seconds: float = 300.0,
+        saves_root: Path | str | None = None,
+        backups_root: Path | str | None = None,
+        on_backup: callable | None = None,
+    ) -> SaveWatcher:
+        key = save.display_name
+        resolved_saves_root = saves_root if saves_root is not None else self.saves_root
+        resolved_backups_root = backups_root if backups_root is not None else self.backups_root
+        with self._lock:
+            if key in self._watchers:
+                old_watcher = self._watchers[key]
+                old_watcher.cancel_pending()
+                # Create new watcher with updated settings and re-schedule
+                watcher = SaveWatcher(
+                    save,
+                    debounce_seconds,
+                    backup_cooldown_seconds,
+                    on_backup=on_backup,
+                    saves_root=resolved_saves_root,
+                    backups_root=resolved_backups_root,
+                    config=self.config,
+                )
+                self._watchers[key] = watcher
+                if key in self._watches:
+
+exec
+/bin/bash -lc "sed -n '1,220p' tests/test_gui.py" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+"""Tests for the Flask web GUI."""
+
+from pathlib import Path
+
+import pytest
+from flask import Flask
+
+from pz_save_manager.config import ConfigStore
+from pz_save_manager.gui import _CSRF_TOKEN, create_app
+from pz_save_manager.routes_api import _manager as api_manager
+
+
+@pytest.fixture
+def client(tmp_path: Path):
+    """Flask test client with test save directories."""
+    saves = tmp_path / "Zomboid" / "Saves"
+    backups = tmp_path / ".pz-save-manager" / "backups"
+    saves.mkdir(parents=True)
+    (saves / "Apocalypse" / "test-world").mkdir(parents=True)
+    (saves / "Apocalypse" / "test-world" / "sandbox.lua").write_text("return {}")
+    (saves / "Apocalypse" / "test-world" / "map").mkdir()
+
+    app = create_app(
+        ConfigStore(tmp_path / "config.json"),
+        saves_root=saves,
+        backups_root=backups,
+    )
+    app.config["TESTING"] = True
+    return app.test_client()
+
+
+def csrf_headers() -> dict[str, str]:
+    return {"X-CSRF-Token": _CSRF_TOKEN}
+
+
+def test_index_shows_saves(client):
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert b"test-world" in resp.data
+    assert b"Apocalypse" in resp.data
+
+
+def test_index_template_is_resolved_by_flask_loader(client):
+    client.application.jinja_env.get_template("index.html")
+
+
+def test_template_is_declared_as_package_data():
+    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+    assert "[tool.setuptools.package-data]" in pyproject
+    assert 'pz_save_manager = ["templates/*.html"]' in pyproject
+
+
+def test_api_manager_fails_closed_without_dependency():
+    app = Flask(__name__)
+    with app.app_context(), pytest.raises(RuntimeError, match="WatcherManager"):
+        api_manager()
+
+
+def test_health_rejects_non_loopback_clients(client):
+    resp = client.get("/health", environ_base={"REMOTE_ADDR": "192.168.1.50"})
+    assert resp.status_code == 403
+
+
+def test_api_backup_creates_backup(client):
+    resp = client.post("/api/backup", json={"game_mode": "Apocalypse", "save_name": "test-world"}, headers=csrf_headers())
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    assert "timestamp" in data
+
+
+def test_api_backup_requires_csrf(client):
+    resp = client.post("/api/backup", json={"game_mode": "Apocalypse", "save_name": "test-world"})
+    assert resp.status_code == 403
+    assert resp.get_json()["ok"] is False
+
+
+def test_api_backup_missing_save_returns_400(client):
+    resp = client.post("/api/backup", json={"game_mode": "Apocalypse", "save_name": "nonexistent"}, headers=csrf_headers())
+    assert resp.status_code == 400
+    assert resp.get_json()["ok"] is False
+
+
+def test_index_keeps_total_backup_count(client, tmp_path: Path):
+    backups = tmp_path / ".pz-save-manager" / "backups" / "Apocalypse" / "test-world"
+    for i in range(51):
+        backup = backups / f"20260526-120{i:03d}"
+        backup.mkdir(parents=True)
+        (backup / ".pz-complete").touch()
+
+    resp = client.get("/")
+
+    assert resp.status_code == 200
+    assert b"Backups (51)" in resp.data
+    assert b"Showing 50 of 51 backups" in resp.data
+
+
+def test_api_restore_invalid_returns_400(client):
+    resp = client.post("/api/restore", json={"game_mode": "X", "save_name": "Y", "timestamp": "bad"}, headers=csrf_headers())
+    assert resp.status_code == 400
+
+
+def test_api_rename_rolls_back_live_save_if_backup_rename_fails(client, tmp_path: Path, monkeypatch):
+    from pz_save_manager.backup import BackupError
+
+    saves = tmp_path / "Zomboid" / "Saves"
+
+    def fail_backup_rename(*args, **kwargs):
+        raise BackupError("backup rename failed")
+
+    monkeypatch.setattr("pz_save_manager.backup.rename_backups_for_save", fail_backup_rename)
+
+    resp = client.post(
+        "/api/save/rename",
+        json={"game_mode": "Apocalypse", "old_name": "test-world", "new_name": "new-world"},
+        headers=csrf_headers(),
+    )
+
+    assert resp.status_code == 400
+    assert (saves / "Apocalypse" / "test-world").is_dir()
+    assert not (saves / "Apocalypse" / "new-world").exists()
+
+
+def test_api_watcher_toggle(client):
+    resp = client.post("/api/watcher/toggle", headers=csrf_headers())
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+    resp = client.post("/api/watcher/toggle", headers=csrf_headers())
+    assert resp.status_code == 200
+
+exec
+/bin/bash -lc "sed -n '1,220p' tests/test_watcher.py" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+"""Tests for the save file watcher."""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+import pytest
+
+from pz_save_manager.backup import BackupRecord
+from pz_save_manager.saves import SaveGame
+from pz_save_manager.watcher import SaveWatcher, WatcherManager
+
+
+class FakeEvent:
+    is_directory = False
+
+
+def test_save_watcher_debounce(tmp_path: Path, monkeypatch):
+    save_dir = tmp_path / "Sandbox" / "test-save"
+    save_dir.mkdir(parents=True)
+    (save_dir / "sandbox.lua").write_text("x")
+    save = SaveGame("Sandbox", "test-save", save_dir)
+
+    from pz_save_manager.backup import create_backup
+    def fake_create_backup(game_mode, save_name, *, auto=False, **kwargs):
+        return BackupRecord(game_mode, save_name, "20260526-120000", tmp_path / "backup", auto=auto)
+    monkeypatch.setattr("pz_save_manager.watcher.create_backup", fake_create_backup)
+
+    backups = []
+    watcher = SaveWatcher(save, debounce_seconds=0.05, on_backup=lambda b: backups.append(b))
+    watcher.on_modified(FakeEvent())
+    import time as _time; _time.sleep(0.2)
+    assert len(backups) == 1, f"Expected 1 backup, got {len(backups)}"
+
+
+def test_watcher_manager_lifecycle():
+    manager = WatcherManager()
+    assert not manager.running
+    manager.start()
+    assert manager.running
+    manager.stop()
+    assert not manager.running
+
+
+def test_watcher_manager_watched_saves(tmp_path: Path):
+    save_dir = tmp_path / "Survivor" / "my-save"
+    save_dir.mkdir(parents=True)
+    save = SaveGame("Survivor", "my-save", save_dir)
+
+    manager = WatcherManager()
+    manager.watch(save)
+    assert "Survivor/my-save" in manager.watched_saves()
+    # Note: unwatch doesn't work with watchdog observer unless actually started
+    # because schedule creates an ObservedWatch wrapper. Tested via integration.
+
+
+def test_stop_annule_le_timer_en_attente(tmp_path: Path, monkeypatch):
+    """stop() doit empêcher un backup débouncé de partir après l'arrêt."""
+    save_dir = tmp_path / "Sandbox" / "stop-save"
+    save_dir.mkdir(parents=True)
+    save = SaveGame("Sandbox", "stop-save", save_dir)
+    created = []
+
+    def fake_create_backup(game_mode: str, save_name: str, *, auto: bool = False, **kwargs) -> BackupRecord:
+        created.append((game_mode, save_name, auto))
+        return BackupRecord(game_mode, save_name, "20260526-120000", tmp_path / "backup", auto=auto)
+
+    monkeypatch.setattr("pz_save_manager.watcher.create_backup", fake_create_backup)
+    manager = WatcherManager()
+    watcher = manager.watch(save, debounce_seconds=0.05, backup_cooldown_seconds=0.0)
+
+    watcher.on_modified(FakeEvent())  # type: ignore
+    manager.stop()
+    time.sleep(0.1)
+
+    assert created == []
+    assert manager.get_backups(save) == []
+
+
+def test_unwatch_annule_le_timer_en_attente(tmp_path: Path, monkeypatch):
+    """unwatch() doit annuler le timer existant avant d'oublier le watcher."""
+    save_dir = tmp_path / "Sandbox" / "unwatch-save"
+    save_dir.mkdir(parents=True)
+    save = SaveGame("Sandbox", "unwatch-save", save_dir)
+    created = []
+
+    def fake_create_backup(game_mode: str, save_name: str, *, auto: bool = False, **kwargs) -> BackupRecord:
+        created.append((game_mode, save_name, auto))
+        return BackupRecord(game_mode, save_name, "20260526-120000", tmp_path / "backup", auto=auto)
+
+    monkeypatch.setattr("pz_save_manager.watcher.create_backup", fake_create_backup)
+    manager = WatcherManager()
+    watcher = manager.watch(save, debounce_seconds=0.05, backup_cooldown_seconds=0.0)
+
+    watcher.on_modified(FakeEvent())  # type: ignore
+    manager.unwatch(save)
+    time.sleep(0.1)
+
+    assert created == []
+    assert save.display_name not in manager.watched_saves()
+
+
+def test_pause_for_suppresses_backup_during_block(tmp_path: Path):
+    """Restoring a watched save must not trigger an immediate auto-backup
+    of the just-restored content."""
+    save_dir = tmp_path / "Sandbox" / "world"
+    save_dir.mkdir(parents=True)
+    save = SaveGame("Sandbox", "world", save_dir)
+
+    backups = []
+    watcher = SaveWatcher(save, debounce_seconds=0.05, on_backup=lambda b: backups.append(b))
+
+    manager = WatcherManager()
+    manager._watchers[save.display_name] = watcher
+
+    class FakeEvent:
+        is_directory = False
+        src_path = str(save_dir / "sandbox.lua")
+
+    # Sanity: an event while NOT paused arms the debounce timer.
+    watcher.on_modified(FakeEvent())
+    assert watcher._timer is not None, "timer should be armed by a normal event"
+
+    # Now pause and replay events — they must be dropped, timer cleared.
+    with manager.pause_for(save):
+        watcher.on_modified(FakeEvent())
+        watcher.on_modified(FakeEvent())
+        assert watcher._timer is None, "paused watcher should not arm a timer"
+
+    # Immediately after resume(), there's a 1s grace window where lingering
+    # in-flight events are still ignored. An event in that window stays
+    # dropped — this is what prevents the post-restore auto-backup.
+    watcher.on_modified(FakeEvent())
+    assert watcher._timer is None, "events during grace window must be dropped"
+
+    # After the grace window expires, normal events arm the timer again.
+    time.sleep(1.1)
+    watcher.on_modified(FakeEvent())
+    assert watcher._timer is not None, "events after grace window must re-arm timer"
+    watcher._timer.cancel()
+
+
+def test_pause_for_is_noop_on_unwatched_save(tmp_path: Path):
+    save_dir = tmp_path / "Sandbox" / "unwatched"
+    save_dir.mkdir(parents=True)
+    save = SaveGame("Sandbox", "unwatched", save_dir)
+    manager = WatcherManager()
+    # Save isn't in manager._watchers — pause_for must be a no-op, not raise.
+    with manager.pause_for(save):
+        pass
+
+codex
+The current watcher already avoids duplicate in-flight backups, so I’ll keep the callback change narrow: record failures without letting the timer thread die. I’m also checking service wiring so both API routes receive the same callback type.
+exec
+/bin/bash -lc "sed -n '220,520p' src/pz_save_manager/watcher.py" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+        on_backup: callable | None = None,
+    ) -> SaveWatcher:
+        key = save.display_name
+        resolved_saves_root = saves_root if saves_root is not None else self.saves_root
+        resolved_backups_root = backups_root if backups_root is not None else self.backups_root
+        with self._lock:
+            if key in self._watchers:
+                old_watcher = self._watchers[key]
+                old_watcher.cancel_pending()
+                # Create new watcher with updated settings and re-schedule
+                watcher = SaveWatcher(
+                    save,
+                    debounce_seconds,
+                    backup_cooldown_seconds,
+                    on_backup=on_backup,
+                    saves_root=resolved_saves_root,
+                    backups_root=resolved_backups_root,
+                    config=self.config,
+                )
+                self._watchers[key] = watcher
+                if key in self._watches:
+                    self._observer.unschedule(self._watches[key])
+                handle = self._observer.schedule(watcher, str(save.path), recursive=True)
+                self._watches[key] = handle
+                return watcher
+            watcher = SaveWatcher(
+                save,
+                debounce_seconds,
+                backup_cooldown_seconds,
+                on_backup=on_backup,
+                saves_root=resolved_saves_root,
+                backups_root=resolved_backups_root,
+                config=self.config,
+            )
+            self._watchers[key] = watcher
+            handle = self._observer.schedule(watcher, str(save.path), recursive=True)
+            self._watches[key] = handle
+            return watcher
+
+    def unwatch(self, save: SaveGame) -> None:
+        key = save.display_name
+        with self._lock:
+            if key in self._watches:
+                self._observer.unschedule(self._watches[key])
+                del self._watches[key]
+            if key in self._watchers:
+                watcher = self._watchers.pop(key)
+                watcher.cancel_pending()
+
+    def watched_saves(self) -> list[str]:
+        with self._lock:
+            return sorted(self._watchers.keys())
+
+    def watcher_settings(self, save: SaveGame) -> tuple[float, float, Path | str | None, Path | str | None] | None:
+        """Return the active watcher settings for a save, if it is watched."""
+        with self._lock:
+            watcher = self._watchers.get(save.display_name)
+            if watcher is None:
+                return None
+            return (
+                watcher.debounce_seconds,
+                watcher.backup_cooldown_seconds,
+                watcher.saves_root,
+                watcher.backups_root,
+            )
+
+    def get_backups(self, save: SaveGame) -> list[BackupRecord]:
+        key = save.display_name
+        with self._lock:
+            if key in self._watchers:
+                return list(self._watchers[key]._backups)
+            return []
+
+    @contextmanager
+    def pause_for(self, save: SaveGame):
+        """Context manager: temporarily silence the watcher for `save`.
+
+        No-op if the save isn't being watched. After the block exits,
+        the watcher resumes with a short grace window so any file
+        events still in watchdog's queue from the operation get dropped
+        instead of triggering an immediate auto-backup.
+        """
+        with self._lock:
+            watcher = self._watchers.get(save.display_name)
+        if watcher is not None:
+            watcher.pause()
+        try:
+            yield
+        finally:
+            if watcher is not None:
+                watcher.resume()
+
+
+# Global instance
+_manager: WatcherManager | None = None
+_manager_lock = threading.Lock()
+
+
+def get_manager(
+    config: "ConfigStore | None" = None,
+    saves_root: Path | str | None = None,
+    backups_root: Path | str | None = None,
+) -> WatcherManager:
+    global _manager
+    if _manager is None:
+        with _manager_lock:
+            if _manager is None:
+                _manager = WatcherManager(config=config, saves_root=saves_root, backups_root=backups_root)
+    return _manager
+
+exec
+/bin/bash -lc "sed -n '1,220p' src/pz_save_manager/watcher_service.py" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+"""Service helpers for configuring save watchers from runtime config."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from .saves import list_saves
+from .watcher import WatcherManager
+
+if TYPE_CHECKING:
+    from .config import ConfigStore
+
+
+def start_watching_saves(
+    manager: WatcherManager,
+    config: "ConfigStore",
+    *,
+    saves_root: Path | str | None = None,
+    backups_root: Path | str | None = None,
+    on_backup: callable | None = None,
+) -> int:
+    """Watch all discovered saves using the current debounce/cooldown settings."""
+    saves = list_saves(saves_root=saves_root)
+    cfg = config.get_all()
+    cooldown = cfg.get("backup_cooldown_minutes", 5) * 60
+    debounce = cfg.get("debounce_seconds", 5.0)
+    for save in saves:
+        manager.watch(
+            save,
+            debounce_seconds=debounce,
+            backup_cooldown_seconds=cooldown,
+            saves_root=saves_root,
+            backups_root=backups_root,
+            on_backup=on_backup,
+        )
+    if not manager.running:
+        manager.start()
+    return len(saves)
+
+exec
+/bin/bash -lc "sed -n '1,220p' tests/test_adversarial.py" in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+"""Adversarial security and robustness tests for PZ Save Manager.
+
+Each test is designed to FAIL against the current code, demonstrating a real risk.
+Updated to reflect P0 fixes: path traversal guard, symlink skipping, atomic backup,
+cleanup resilience, and logged (not silent) watcher errors.
+"""
+
+import logging
+import threading
+from datetime import datetime
+from pathlib import Path
+
+import pytest
+
+import pz_save_manager.backup as backup_mod
+from pz_save_manager.saves import SaveGame, SaveManagerError, get_save
+
+
+# ── RISK 1: Path traversal in get_save() ──────────────────────────────
+def test_get_save_rejects_path_traversal(tmp_path: Path) -> None:
+    saves = tmp_path / "saves"
+    (saves / "Sandbox").mkdir(parents=True)
+    outside = tmp_path / "secret"
+    outside.mkdir()
+
+    with pytest.raises(SaveManagerError):
+        get_save("Sandbox", "../../secret", saves_root=saves)
+
+
+# ── RISK 2: Symlink materialisation during restore ────────────────────
+def test_restore_does_not_follow_backup_symlinks(tmp_path: Path) -> None:
+    saves = tmp_path / "saves"
+    backups = tmp_path / "backups"
+    backup_dir = backups / "Sandbox" / "World" / "20260518-120000"
+    backup_dir.mkdir(parents=True)
+    (backup_dir / ".pz-complete").touch()
+
+    secret = tmp_path / "secret.txt"
+    secret.write_text("do-not-copy", encoding="utf-8")
+    (backup_dir / "leak.txt").symlink_to(secret)
+
+    backup_mod.restore_backup(
+        "Sandbox", "World", "20260518-120000",
+        saves_root=saves, backups_root=backups,
+    )
+
+    # P0 fix: symlinks are now SKIPPED entirely during copytree
+    assert not (saves / "Sandbox" / "World" / "leak.txt").exists(), (
+        "Symlink was followed — external file materialised in live save!"
+    )
+
+
+# ── RISK 3: Non-atomic backup creation (TOCTOU race) ──────────────────
+def test_concurrent_backups_get_distinct_destinations(
+    tmp_path: Path,
+) -> None:
+    saves = tmp_path / "saves"
+    backups = tmp_path / "backups"
+    save_dir = saves / "Sandbox" / "World"
+    save_dir.mkdir(parents=True)
+    (save_dir / "map.bin").write_text("x", encoding="utf-8")
+
+    results: list[str] = []
+    errors: list[Exception] = []
+
+    def worker() -> None:
+        try:
+            b = backup_mod.create_backup(
+                "Sandbox", "World",
+                saves_root=saves, backups_root=backups,
+                now=datetime(2026, 5, 18, 12, 0, 0),
+            )
+            results.append(b.timestamp)
+        except Exception as exc:
+            errors.append(exc)
+
+    t1 = threading.Thread(target=worker)
+    t2 = threading.Thread(target=worker)
+    t1.start(); t2.start(); t1.join(); t2.join()
+
+    # P0 fix: _unique_destination now uses atomic mkdir — no FileExistsError
+    assert not errors, f"Concurrent backup failed with: {errors}"
+    assert sorted(results) == ["20260518-120000", "20260518-120000-01"], (
+        f"Expected two distinct timestamps, got: {results}"
+    )
+
+
+# ── RISK 4: Restore survives cleanup failure ──────────────────────────
+def test_restore_survives_cleanup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    saves = tmp_path / "saves"
+    backups = tmp_path / "backups"
+    live = saves / "Sandbox" / "World"
+    live.mkdir(parents=True)
+    (live / "sandbox.lua").write_text("live-content", encoding="utf-8")
+
+    backup = backup_mod.create_backup(
+        "Sandbox", "World",
+        saves_root=saves, backups_root=backups,
+        now=datetime(2026, 5, 18, 12, 0, 0),
+    )
+    (backup.path / "sandbox.lua").write_text("backup-content", encoding="utf-8")
+
+    def fail_rmtree(path, *args, **kwargs):
+        raise OSError("cleanup failed")
+
+    monkeypatch.setattr(backup_mod.shutil, "rmtree", fail_rmtree)
+
+    # P0 fix: cleanup failure no longer raises — restore succeeds, old save is replaced
+    backup_mod.restore_backup(
+        "Sandbox", "World", backup.timestamp,
+        saves_root=saves, backups_root=backups,
+    )
+
+    assert (live / "sandbox.lua").read_text("utf-8") == "backup-content", (
+        "Restore failed to replace live save with backup content"
+    )
+
+
+# ── RISK 5: Watcher errors are logged, not silent ─────────────────────
+def test_watcher_logs_backup_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import pz_save_manager.watcher as watcher_mod
+
+    save_dir = tmp_path / "World"
+    save_dir.mkdir()
+    (save_dir / "sandbox.lua").write_text("x", encoding="utf-8")
+    save = SaveGame("Sandbox", "World", save_dir)
+    watcher = watcher_mod.SaveWatcher(save, debounce_seconds=0)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("backup infrastructure down")
+
+    monkeypatch.setattr(watcher_mod, "create_backup", fail)
+
+    with caplog.at_level(logging.ERROR):
+        watcher._do_backup()
+
+    # P0 fix: errors are now LOGGED instead of silently swallowed
+    assert "backup infrastructure down" in caplog.text, (
+        "Watcher failure was not logged — silent error!"
+    )
+
+codex
+There’s a circular-import risk if `routes_api.py` imports the new helper while `gui.py` imports API routes at module load. I’m going to move the API-route import into `create_app()`, which keeps the helper importable and avoids changing runtime behavior.
+codex
+I’m applying a focused patch now: one shared recorder, both API watch paths using it, the template seeded from server state, and callback exception logging in the watcher.
+apply patch
+patch: completed
+/home/chpo/pz-save-manager/src/pz_save_manager/gui.py
+diff --git a/src/pz_save_manager/gui.py b/src/pz_save_manager/gui.py
+index 7e333429ebed3fd803126b6b8f66b28479111625..ab4410205cfd7f5ce7343ed7aa4fb321808b9068
+--- a/src/pz_save_manager/gui.py
++++ b/src/pz_save_manager/gui.py
+@@ -14,7 +14,6 @@
+ from .csrf import CSRF_TOKEN as _CSRF_TOKEN
+ from .csrf import _generate_csrf_token
+ from .platforms import get_backups_root, get_saves_root
+-from .routes_api import register_api_routes
+ from .save_info import extract_all, player_info
+ from .saves import SaveGame, get_save_modified_time, list_saves
+ from .watcher import WatcherManager
+@@ -45,6 +44,16 @@
+     raise RuntimeError("Flask app is missing a WatcherManager dependency")
+ 
+ 
++def make_auto_backup_recorder(app: Flask):
++    """Return a callback that records the last auto-backup time on the given app."""
++    import time
++
++    def record(backup):
++        app.config["last_auto_backup"] = time.time()
++
++    return record
++
++
+ def _render_page(
+     *,
+     saves: list[dict],
+@@ -61,6 +70,7 @@
+         backup_count=backup_count,
+         watcher_running=watcher_running,
+         csrf_token=csrf_token,
++        last_auto_backup=current_app.config.get("last_auto_backup", 0.0),
+     )
+ 
+ 
+@@ -253,12 +263,11 @@
+     flask_app.config["_saves_root_override"] = saves_root
+     flask_app.config["_backups_root_override"] = resolved_backups_root
+     flask_app.config["last_auto_backup"] = 0.0
++    on_auto_backup = make_auto_backup_recorder(flask_app)
+ 
+-    def _on_auto_backup(backup):
+-        import time
+-        flask_app.config["last_auto_backup"] = time.time()
++    _register_page_routes(flask_app)
++    from .routes_api import register_api_routes
+ 
+-    _register_page_routes(flask_app)
+     register_api_routes(flask_app)
+     if config_store.get("auto_start_watcher"):
+         start_watching_saves(
+@@ -266,7 +275,7 @@
+             config_store,
+             saves_root=saves_root,
+             backups_root=resolved_backups_root,
+-            on_backup=_on_auto_backup,
++            on_backup=on_auto_backup,
+         )
+     return flask_app
+ 
+
+diff --git a/src/pz_save_manager/gui.py b/src/pz_save_manager/gui.py
+index 7e333429ebed3fd803126b6b8f66b28479111625..ab4410205cfd7f5ce7343ed7aa4fb321808b9068
+--- a/src/pz_save_manager/gui.py
++++ b/src/pz_save_manager/gui.py
+@@ -14,7 +14,6 @@
+ from .csrf import CSRF_TOKEN as _CSRF_TOKEN
+ from .csrf import _generate_csrf_token
+ from .platforms import get_backups_root, get_saves_root
+-from .routes_api import register_api_routes
+ from .save_info import extract_all, player_info
+ from .saves import SaveGame, get_save_modified_time, list_saves
+ from .watcher import WatcherManager
+@@ -45,6 +44,16 @@
+     raise RuntimeError("Flask app is missing a WatcherManager dependency")
+ 
+ 
++def make_auto_backup_recorder(app: Flask):
++    """Return a callback that records the last auto-backup time on the given app."""
++    import time
++
++    def record(backup):
++        app.config["last_auto_backup"] = time.time()
++
++    return record
++
++
+ def _render_page(
+     *,
+     saves: list[dict],
+@@ -61,6 +70,7 @@
+         backup_count=backup_count,
+         watcher_running=watcher_running,
+         csrf_token=csrf_token,
++        last_auto_backup=current_app.config.get("last_auto_backup", 0.0),
+     )
+ 
+ 
+@@ -253,12 +263,11 @@
+     flask_app.config["_saves_root_override"] = saves_root
+     flask_app.config["_backups_root_override"] = resolved_backups_root
+     flask_app.config["last_auto_backup"] = 0.0
++    on_auto_backup = make_auto_backup_recorder(flask_app)
+ 
+-    def _on_auto_backup(backup):
+-        import time
+-        flask_app.config["last_auto_backup"] = time.time()
++    _register_page_routes(flask_app)
++    from .routes_api import register_api_routes
+ 
+-    _register_page_routes(flask_app)
+     register_api_routes(flask_app)
+     if config_store.get("auto_start_watcher"):
+         start_watching_saves(
+@@ -266,7 +275,7 @@
+             config_store,
+             saves_root=saves_root,
+             backups_root=resolved_backups_root,
+-            on_backup=_on_auto_backup,
++            on_backup=on_auto_backup,
+         )
+     return flask_app
+ 
+
+apply patch
+patch: completed
+/home/chpo/pz-save-manager/src/pz_save_manager/routes_api.py
+diff --git a/src/pz_save_manager/gui.py b/src/pz_save_manager/gui.py
+index 7e333429ebed3fd803126b6b8f66b28479111625..ab4410205cfd7f5ce7343ed7aa4fb321808b9068
+--- a/src/pz_save_manager/gui.py
++++ b/src/pz_save_manager/gui.py
+@@ -14,7 +14,6 @@
+ from .csrf import CSRF_TOKEN as _CSRF_TOKEN
+ from .csrf import _generate_csrf_token
+ from .platforms import get_backups_root, get_saves_root
+-from .routes_api import register_api_routes
+ from .save_info import extract_all, player_info
+ from .saves import SaveGame, get_save_modified_time, list_saves
+ from .watcher import WatcherManager
+@@ -45,6 +44,16 @@
+     raise RuntimeError("Flask app is missing a WatcherManager dependency")
+ 
+ 
++def make_auto_backup_recorder(app: Flask):
++    """Return a callback that records the last auto-backup time on the given app."""
++    import time
++
++    def record(backup):
++        app.config["last_auto_backup"] = time.time()
++
++    return record
++
++
+ def _render_page(
+     *,
+     saves: list[dict],
+@@ -61,6 +70,7 @@
+         backup_count=backup_count,
+         watcher_running=watcher_running,
+         csrf_token=csrf_token,
++        last_auto_backup=current_app.config.get("last_auto_backup", 0.0),
+     )
+ 
+ 
+@@ -253,12 +263,11 @@
+     flask_app.config["_saves_root_override"] = saves_root
+     flask_app.config["_backups_root_override"] = resolved_backups_root
+     flask_app.config["last_auto_backup"] = 0.0
++    on_auto_backup = make_auto_backup_recorder(flask_app)
+ 
+-    def _on_auto_backup(backup):
+-        import time
+-        flask_app.config["last_auto_backup"] = time.time()
++    _register_page_routes(flask_app)
++    from .routes_api import register_api_routes
+ 
+-    _register_page_routes(flask_app)
+     register_api_routes(flask_app)
+     if config_store.get("auto_start_watcher"):
+         start_watching_saves(
+@@ -266,7 +275,7 @@
+             config_store,
+             saves_root=saves_root,
+             backups_root=resolved_backups_root,
+-            on_backup=_on_auto_backup,
++            on_backup=on_auto_backup,
+         )
+     return flask_app
+ 
+diff --git a/src/pz_save_manager/routes_api.py b/src/pz_save_manager/routes_api.py
+index d7cdebbfa4a4407f7cff53001070b9e7236e730f..b003c433cdd3c10153994185db8c4f65f7229244
+--- a/src/pz_save_manager/routes_api.py
++++ b/src/pz_save_manager/routes_api.py
+@@ -8,6 +8,7 @@
+ from .backup_service import rename_save, restore_save
+ from .config import ConfigStore, default_store
+ from .csrf import _check_csrf
++from .gui import make_auto_backup_recorder
+ from .save_service import backup_save
+ from .saves import SaveNotFound
+ from .watcher import WatcherManager
+@@ -155,7 +156,7 @@
+         _config_store(),
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
+-        on_backup=lambda b: setattr(current_app.config, "last_auto_backup", __import__("time").time()),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     return jsonify({"ok": True, "message": f"Watcher started ({save_count} saves)"})
+ 
+@@ -186,6 +187,7 @@
+         backup_cooldown_seconds=cooldown,
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     if not manager.running:
+         manager.start()
+
+diff --git a/src/pz_save_manager/gui.py b/src/pz_save_manager/gui.py
+index 7e333429ebed3fd803126b6b8f66b28479111625..ab4410205cfd7f5ce7343ed7aa4fb321808b9068
+--- a/src/pz_save_manager/gui.py
++++ b/src/pz_save_manager/gui.py
+@@ -14,7 +14,6 @@
+ from .csrf import CSRF_TOKEN as _CSRF_TOKEN
+ from .csrf import _generate_csrf_token
+ from .platforms import get_backups_root, get_saves_root
+-from .routes_api import register_api_routes
+ from .save_info import extract_all, player_info
+ from .saves import SaveGame, get_save_modified_time, list_saves
+ from .watcher import WatcherManager
+@@ -45,6 +44,16 @@
+     raise RuntimeError("Flask app is missing a WatcherManager dependency")
+ 
+ 
++def make_auto_backup_recorder(app: Flask):
++    """Return a callback that records the last auto-backup time on the given app."""
++    import time
++
++    def record(backup):
++        app.config["last_auto_backup"] = time.time()
++
++    return record
++
++
+ def _render_page(
+     *,
+     saves: list[dict],
+@@ -61,6 +70,7 @@
+         backup_count=backup_count,
+         watcher_running=watcher_running,
+         csrf_token=csrf_token,
++        last_auto_backup=current_app.config.get("last_auto_backup", 0.0),
+     )
+ 
+ 
+@@ -253,12 +263,11 @@
+     flask_app.config["_saves_root_override"] = saves_root
+     flask_app.config["_backups_root_override"] = resolved_backups_root
+     flask_app.config["last_auto_backup"] = 0.0
++    on_auto_backup = make_auto_backup_recorder(flask_app)
+ 
+-    def _on_auto_backup(backup):
+-        import time
+-        flask_app.config["last_auto_backup"] = time.time()
++    _register_page_routes(flask_app)
++    from .routes_api import register_api_routes
+ 
+-    _register_page_routes(flask_app)
+     register_api_routes(flask_app)
+     if config_store.get("auto_start_watcher"):
+         start_watching_saves(
+@@ -266,7 +275,7 @@
+             config_store,
+             saves_root=saves_root,
+             backups_root=resolved_backups_root,
+-            on_backup=_on_auto_backup,
++            on_backup=on_auto_backup,
+         )
+     return flask_app
+ 
+diff --git a/src/pz_save_manager/routes_api.py b/src/pz_save_manager/routes_api.py
+index d7cdebbfa4a4407f7cff53001070b9e7236e730f..b003c433cdd3c10153994185db8c4f65f7229244
+--- a/src/pz_save_manager/routes_api.py
++++ b/src/pz_save_manager/routes_api.py
+@@ -8,6 +8,7 @@
+ from .backup_service import rename_save, restore_save
+ from .config import ConfigStore, default_store
+ from .csrf import _check_csrf
++from .gui import make_auto_backup_recorder
+ from .save_service import backup_save
+ from .saves import SaveNotFound
+ from .watcher import WatcherManager
+@@ -155,7 +156,7 @@
+         _config_store(),
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
+-        on_backup=lambda b: setattr(current_app.config, "last_auto_backup", __import__("time").time()),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     return jsonify({"ok": True, "message": f"Watcher started ({save_count} saves)"})
+ 
+@@ -186,6 +187,7 @@
+         backup_cooldown_seconds=cooldown,
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     if not manager.running:
+         manager.start()
+
+apply patch
+patch: completed
+/home/chpo/pz-save-manager/src/pz_save_manager/watcher.py
+diff --git a/src/pz_save_manager/gui.py b/src/pz_save_manager/gui.py
+index 7e333429ebed3fd803126b6b8f66b28479111625..ab4410205cfd7f5ce7343ed7aa4fb321808b9068
+--- a/src/pz_save_manager/gui.py
++++ b/src/pz_save_manager/gui.py
+@@ -14,7 +14,6 @@
+ from .csrf import CSRF_TOKEN as _CSRF_TOKEN
+ from .csrf import _generate_csrf_token
+ from .platforms import get_backups_root, get_saves_root
+-from .routes_api import register_api_routes
+ from .save_info import extract_all, player_info
+ from .saves import SaveGame, get_save_modified_time, list_saves
+ from .watcher import WatcherManager
+@@ -45,6 +44,16 @@
+     raise RuntimeError("Flask app is missing a WatcherManager dependency")
+ 
+ 
++def make_auto_backup_recorder(app: Flask):
++    """Return a callback that records the last auto-backup time on the given app."""
++    import time
++
++    def record(backup):
++        app.config["last_auto_backup"] = time.time()
++
++    return record
++
++
+ def _render_page(
+     *,
+     saves: list[dict],
+@@ -61,6 +70,7 @@
+         backup_count=backup_count,
+         watcher_running=watcher_running,
+         csrf_token=csrf_token,
++        last_auto_backup=current_app.config.get("last_auto_backup", 0.0),
+     )
+ 
+ 
+@@ -253,12 +263,11 @@
+     flask_app.config["_saves_root_override"] = saves_root
+     flask_app.config["_backups_root_override"] = resolved_backups_root
+     flask_app.config["last_auto_backup"] = 0.0
++    on_auto_backup = make_auto_backup_recorder(flask_app)
+ 
+-    def _on_auto_backup(backup):
+-        import time
+-        flask_app.config["last_auto_backup"] = time.time()
++    _register_page_routes(flask_app)
++    from .routes_api import register_api_routes
+ 
+-    _register_page_routes(flask_app)
+     register_api_routes(flask_app)
+     if config_store.get("auto_start_watcher"):
+         start_watching_saves(
+@@ -266,7 +275,7 @@
+             config_store,
+             saves_root=saves_root,
+             backups_root=resolved_backups_root,
+-            on_backup=_on_auto_backup,
++            on_backup=on_auto_backup,
+         )
+     return flask_app
+ 
+diff --git a/src/pz_save_manager/routes_api.py b/src/pz_save_manager/routes_api.py
+index d7cdebbfa4a4407f7cff53001070b9e7236e730f..b003c433cdd3c10153994185db8c4f65f7229244
+--- a/src/pz_save_manager/routes_api.py
++++ b/src/pz_save_manager/routes_api.py
+@@ -8,6 +8,7 @@
+ from .backup_service import rename_save, restore_save
+ from .config import ConfigStore, default_store
+ from .csrf import _check_csrf
++from .gui import make_auto_backup_recorder
+ from .save_service import backup_save
+ from .saves import SaveNotFound
+ from .watcher import WatcherManager
+@@ -155,7 +156,7 @@
+         _config_store(),
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
+-        on_backup=lambda b: setattr(current_app.config, "last_auto_backup", __import__("time").time()),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     return jsonify({"ok": True, "message": f"Watcher started ({save_count} saves)"})
+ 
+@@ -186,6 +187,7 @@
+         backup_cooldown_seconds=cooldown,
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     if not manager.running:
+         manager.start()
+diff --git a/src/pz_save_manager/watcher.py b/src/pz_save_manager/watcher.py
+index 1df54d6c173b23217b4c32879c4bef07453385d6..781a478cdf13b20af2194b4ba09cb144eee04755
+--- a/src/pz_save_manager/watcher.py
++++ b/src/pz_save_manager/watcher.py
+@@ -156,7 +156,12 @@
+                         self._timer.daemon = True
+                         self._timer.start()
+         if backup is not None and callback:
+-            callback(backup)
++            try:
++                callback(backup)
++            except Exception:
++                import logging
++
++                logging.getLogger(__name__).error("auto-backup callback failed", exc_info=True)
+ 
+ 
+ class WatcherManager:
+
+diff --git a/src/pz_save_manager/gui.py b/src/pz_save_manager/gui.py
+index 7e333429ebed3fd803126b6b8f66b28479111625..ab4410205cfd7f5ce7343ed7aa4fb321808b9068
+--- a/src/pz_save_manager/gui.py
++++ b/src/pz_save_manager/gui.py
+@@ -14,7 +14,6 @@
+ from .csrf import CSRF_TOKEN as _CSRF_TOKEN
+ from .csrf import _generate_csrf_token
+ from .platforms import get_backups_root, get_saves_root
+-from .routes_api import register_api_routes
+ from .save_info import extract_all, player_info
+ from .saves import SaveGame, get_save_modified_time, list_saves
+ from .watcher import WatcherManager
+@@ -45,6 +44,16 @@
+     raise RuntimeError("Flask app is missing a WatcherManager dependency")
+ 
+ 
++def make_auto_backup_recorder(app: Flask):
++    """Return a callback that records the last auto-backup time on the given app."""
++    import time
++
++    def record(backup):
++        app.config["last_auto_backup"] = time.time()
++
++    return record
++
++
+ def _render_page(
+     *,
+     saves: list[dict],
+@@ -61,6 +70,7 @@
+         backup_count=backup_count,
+         watcher_running=watcher_running,
+         csrf_token=csrf_token,
++        last_auto_backup=current_app.config.get("last_auto_backup", 0.0),
+     )
+ 
+ 
+@@ -253,12 +263,11 @@
+     flask_app.config["_saves_root_override"] = saves_root
+     flask_app.config["_backups_root_override"] = resolved_backups_root
+     flask_app.config["last_auto_backup"] = 0.0
++    on_auto_backup = make_auto_backup_recorder(flask_app)
+ 
+-    def _on_auto_backup(backup):
+-        import time
+-        flask_app.config["last_auto_backup"] = time.time()
++    _register_page_routes(flask_app)
++    from .routes_api import register_api_routes
+ 
+-    _register_page_routes(flask_app)
+     register_api_routes(flask_app)
+     if config_store.get("auto_start_watcher"):
+         start_watching_saves(
+@@ -266,7 +275,7 @@
+             config_store,
+             saves_root=saves_root,
+             backups_root=resolved_backups_root,
+-            on_backup=_on_auto_backup,
++            on_backup=on_auto_backup,
+         )
+     return flask_app
+ 
+diff --git a/src/pz_save_manager/routes_api.py b/src/pz_save_manager/routes_api.py
+index d7cdebbfa4a4407f7cff53001070b9e7236e730f..b003c433cdd3c10153994185db8c4f65f7229244
+--- a/src/pz_save_manager/routes_api.py
++++ b/src/pz_save_manager/routes_api.py
+@@ -8,6 +8,7 @@
+ from .backup_service import rename_save, restore_save
+ from .config import ConfigStore, default_store
+ from .csrf import _check_csrf
++from .gui import make_auto_backup_recorder
+ from .save_service import backup_save
+ from .saves import SaveNotFound
+ from .watcher import WatcherManager
+@@ -155,7 +156,7 @@
+         _config_store(),
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
+-        on_backup=lambda b: setattr(current_app.config, "last_auto_backup", __import__("time").time()),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     return jsonify({"ok": True, "message": f"Watcher started ({save_count} saves)"})
+ 
+@@ -186,6 +187,7 @@
+         backup_cooldown_seconds=cooldown,
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     if not manager.running:
+         manager.start()
+diff --git a/src/pz_save_manager/watcher.py b/src/pz_save_manager/watcher.py
+index 1df54d6c173b23217b4c32879c4bef07453385d6..781a478cdf13b20af2194b4ba09cb144eee04755
+--- a/src/pz_save_manager/watcher.py
++++ b/src/pz_save_manager/watcher.py
+@@ -156,7 +156,12 @@
+                         self._timer.daemon = True
+                         self._timer.start()
+         if backup is not None and callback:
+-            callback(backup)
++            try:
++                callback(backup)
++            except Exception:
++                import logging
++
++                logging.getLogger(__name__).error("auto-backup callback failed", exc_info=True)
+ 
+ 
+ class WatcherManager:
+
+apply patch
+patch: completed
+/home/chpo/pz-save-manager/src/pz_save_manager/templates/index.html
+diff --git a/src/pz_save_manager/gui.py b/src/pz_save_manager/gui.py
+index 7e333429ebed3fd803126b6b8f66b28479111625..ab4410205cfd7f5ce7343ed7aa4fb321808b9068
+--- a/src/pz_save_manager/gui.py
++++ b/src/pz_save_manager/gui.py
+@@ -14,7 +14,6 @@
+ from .csrf import CSRF_TOKEN as _CSRF_TOKEN
+ from .csrf import _generate_csrf_token
+ from .platforms import get_backups_root, get_saves_root
+-from .routes_api import register_api_routes
+ from .save_info import extract_all, player_info
+ from .saves import SaveGame, get_save_modified_time, list_saves
+ from .watcher import WatcherManager
+@@ -45,6 +44,16 @@
+     raise RuntimeError("Flask app is missing a WatcherManager dependency")
+ 
+ 
++def make_auto_backup_recorder(app: Flask):
++    """Return a callback that records the last auto-backup time on the given app."""
++    import time
++
++    def record(backup):
++        app.config["last_auto_backup"] = time.time()
++
++    return record
++
++
+ def _render_page(
+     *,
+     saves: list[dict],
+@@ -61,6 +70,7 @@
+         backup_count=backup_count,
+         watcher_running=watcher_running,
+         csrf_token=csrf_token,
++        last_auto_backup=current_app.config.get("last_auto_backup", 0.0),
+     )
+ 
+ 
+@@ -253,12 +263,11 @@
+     flask_app.config["_saves_root_override"] = saves_root
+     flask_app.config["_backups_root_override"] = resolved_backups_root
+     flask_app.config["last_auto_backup"] = 0.0
++    on_auto_backup = make_auto_backup_recorder(flask_app)
+ 
+-    def _on_auto_backup(backup):
+-        import time
+-        flask_app.config["last_auto_backup"] = time.time()
++    _register_page_routes(flask_app)
++    from .routes_api import register_api_routes
+ 
+-    _register_page_routes(flask_app)
+     register_api_routes(flask_app)
+     if config_store.get("auto_start_watcher"):
+         start_watching_saves(
+@@ -266,7 +275,7 @@
+             config_store,
+             saves_root=saves_root,
+             backups_root=resolved_backups_root,
+-            on_backup=_on_auto_backup,
++            on_backup=on_auto_backup,
+         )
+     return flask_app
+ 
+diff --git a/src/pz_save_manager/routes_api.py b/src/pz_save_manager/routes_api.py
+index d7cdebbfa4a4407f7cff53001070b9e7236e730f..b003c433cdd3c10153994185db8c4f65f7229244
+--- a/src/pz_save_manager/routes_api.py
++++ b/src/pz_save_manager/routes_api.py
+@@ -8,6 +8,7 @@
+ from .backup_service import rename_save, restore_save
+ from .config import ConfigStore, default_store
+ from .csrf import _check_csrf
++from .gui import make_auto_backup_recorder
+ from .save_service import backup_save
+ from .saves import SaveNotFound
+ from .watcher import WatcherManager
+@@ -155,7 +156,7 @@
+         _config_store(),
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
+-        on_backup=lambda b: setattr(current_app.config, "last_auto_backup", __import__("time").time()),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     return jsonify({"ok": True, "message": f"Watcher started ({save_count} saves)"})
+ 
+@@ -186,6 +187,7 @@
+         backup_cooldown_seconds=cooldown,
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     if not manager.running:
+         manager.start()
+diff --git a/src/pz_save_manager/templates/index.html b/src/pz_save_manager/templates/index.html
+index cbe8de296bae53c2f9692c0eb088d9efa445d678..c5c80140737bd1b96de8d9c3cdec433a7b1c530f
+--- a/src/pz_save_manager/templates/index.html
++++ b/src/pz_save_manager/templates/index.html
+@@ -176,7 +176,7 @@
+ function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,backup_cooldown_minutes:document.getElementById("cfg-cooldown").value,max_auto_backups:document.getElementById("cfg-max-auto").value};doAction(null,'/api/config',data,'Settings saved!')}
+ function shutdown(){if(!confirm('Close PZ Save Manager?'))return;api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style="text-align:center;padding:4rem;color:#888"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'}).catch(function(){toast('Network error','var(--red)')})}
+ // Auto-refresh: poll for new auto-backups every 5 seconds
+-var _lastAuto = 0;
++var _lastAuto = {{ last_auto_backup }};
+ setInterval(function(){api("GET","/api/backup/last-auto").then(function(r){return r.json()}).then(function(d){var t=d.last_auto;if(t>_lastAuto){_lastAuto=t;location.reload()}}).catch(function(){})},5000);
+ </script>
+ </body>
+diff --git a/src/pz_save_manager/watcher.py b/src/pz_save_manager/watcher.py
+index 1df54d6c173b23217b4c32879c4bef07453385d6..781a478cdf13b20af2194b4ba09cb144eee04755
+--- a/src/pz_save_manager/watcher.py
++++ b/src/pz_save_manager/watcher.py
+@@ -156,7 +156,12 @@
+                         self._timer.daemon = True
+                         self._timer.start()
+         if backup is not None and callback:
+-            callback(backup)
++            try:
++                callback(backup)
++            except Exception:
++                import logging
++
++                logging.getLogger(__name__).error("auto-backup callback failed", exc_info=True)
+ 
+ 
+ class WatcherManager:
+
+diff --git a/src/pz_save_manager/gui.py b/src/pz_save_manager/gui.py
+index 7e333429ebed3fd803126b6b8f66b28479111625..ab4410205cfd7f5ce7343ed7aa4fb321808b9068
+--- a/src/pz_save_manager/gui.py
++++ b/src/pz_save_manager/gui.py
+@@ -14,7 +14,6 @@
+ from .csrf import CSRF_TOKEN as _CSRF_TOKEN
+ from .csrf import _generate_csrf_token
+ from .platforms import get_backups_root, get_saves_root
+-from .routes_api import register_api_routes
+ from .save_info import extract_all, player_info
+ from .saves import SaveGame, get_save_modified_time, list_saves
+ from .watcher import WatcherManager
+@@ -45,6 +44,16 @@
+     raise RuntimeError("Flask app is missing a WatcherManager dependency")
+ 
+ 
++def make_auto_backup_recorder(app: Flask):
++    """Return a callback that records the last auto-backup time on the given app."""
++    import time
++
++    def record(backup):
++        app.config["last_auto_backup"] = time.time()
++
++    return record
++
++
+ def _render_page(
+     *,
+     saves: list[dict],
+@@ -61,6 +70,7 @@
+         backup_count=backup_count,
+         watcher_running=watcher_running,
+         csrf_token=csrf_token,
++        last_auto_backup=current_app.config.get("last_auto_backup", 0.0),
+     )
+ 
+ 
+@@ -253,12 +263,11 @@
+     flask_app.config["_saves_root_override"] = saves_root
+     flask_app.config["_backups_root_override"] = resolved_backups_root
+     flask_app.config["last_auto_backup"] = 0.0
++    on_auto_backup = make_auto_backup_recorder(flask_app)
+ 
+-    def _on_auto_backup(backup):
+-        import time
+-        flask_app.config["last_auto_backup"] = time.time()
++    _register_page_routes(flask_app)
++    from .routes_api import register_api_routes
+ 
+-    _register_page_routes(flask_app)
+     register_api_routes(flask_app)
+     if config_store.get("auto_start_watcher"):
+         start_watching_saves(
+@@ -266,7 +275,7 @@
+             config_store,
+             saves_root=saves_root,
+             backups_root=resolved_backups_root,
+-            on_backup=_on_auto_backup,
++            on_backup=on_auto_backup,
+         )
+     return flask_app
+ 
+diff --git a/src/pz_save_manager/routes_api.py b/src/pz_save_manager/routes_api.py
+index d7cdebbfa4a4407f7cff53001070b9e7236e730f..b003c433cdd3c10153994185db8c4f65f7229244
+--- a/src/pz_save_manager/routes_api.py
++++ b/src/pz_save_manager/routes_api.py
+@@ -8,6 +8,7 @@
+ from .backup_service import rename_save, restore_save
+ from .config import ConfigStore, default_store
+ from .csrf import _check_csrf
++from .gui import make_auto_backup_recorder
+ from .save_service import backup_save
+ from .saves import SaveNotFound
+ from .watcher import WatcherManager
+@@ -155,7 +156,7 @@
+         _config_store(),
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
+-        on_backup=lambda b: setattr(current_app.config, "last_auto_backup", __import__("time").time()),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     return jsonify({"ok": True, "message": f"Watcher started ({save_count} saves)"})
+ 
+@@ -186,6 +187,7 @@
+         backup_cooldown_seconds=cooldown,
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     if not manager.running:
+         manager.start()
+diff --git a/src/pz_save_manager/templates/index.html b/src/pz_save_manager/templates/index.html
+index cbe8de296bae53c2f9692c0eb088d9efa445d678..c5c80140737bd1b96de8d9c3cdec433a7b1c530f
+--- a/src/pz_save_manager/templates/index.html
++++ b/src/pz_save_manager/templates/index.html
+@@ -176,7 +176,7 @@
+ function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,backup_cooldown_minutes:document.getElementById("cfg-cooldown").value,max_auto_backups:document.getElementById("cfg-max-auto").value};doAction(null,'/api/config',data,'Settings saved!')}
+ function shutdown(){if(!confirm('Close PZ Save Manager?'))return;api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style="text-align:center;padding:4rem;color:#888"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'}).catch(function(){toast('Network error','var(--red)')})}
+ // Auto-refresh: poll for new auto-backups every 5 seconds
+-var _lastAuto = 0;
++var _lastAuto = {{ last_auto_backup }};
+ setInterval(function(){api("GET","/api/backup/last-auto").then(function(r){return r.json()}).then(function(d){var t=d.last_auto;if(t>_lastAuto){_lastAuto=t;location.reload()}}).catch(function(){})},5000);
+ </script>
+ </body>
+diff --git a/src/pz_save_manager/watcher.py b/src/pz_save_manager/watcher.py
+index 1df54d6c173b23217b4c32879c4bef07453385d6..781a478cdf13b20af2194b4ba09cb144eee04755
+--- a/src/pz_save_manager/watcher.py
++++ b/src/pz_save_manager/watcher.py
+@@ -156,7 +156,12 @@
+                         self._timer.daemon = True
+                         self._timer.start()
+         if backup is not None and callback:
+-            callback(backup)
++            try:
++                callback(backup)
++            except Exception:
++                import logging
++
++                logging.getLogger(__name__).error("auto-backup callback failed", exc_info=True)
+ 
+ 
+ class WatcherManager:
+
+codex
+The code paths are patched. I’m adding the regression test requested for calling the recorder with no request context, then I’ll run the full test suite.
+apply patch
+patch: completed
+/home/chpo/pz-save-manager/tests/test_gui.py
+diff --git a/src/pz_save_manager/gui.py b/src/pz_save_manager/gui.py
+index 7e333429ebed3fd803126b6b8f66b28479111625..ab4410205cfd7f5ce7343ed7aa4fb321808b9068
+--- a/src/pz_save_manager/gui.py
++++ b/src/pz_save_manager/gui.py
+@@ -14,7 +14,6 @@
+ from .csrf import CSRF_TOKEN as _CSRF_TOKEN
+ from .csrf import _generate_csrf_token
+ from .platforms import get_backups_root, get_saves_root
+-from .routes_api import register_api_routes
+ from .save_info import extract_all, player_info
+ from .saves import SaveGame, get_save_modified_time, list_saves
+ from .watcher import WatcherManager
+@@ -45,6 +44,16 @@
+     raise RuntimeError("Flask app is missing a WatcherManager dependency")
+ 
+ 
++def make_auto_backup_recorder(app: Flask):
++    """Return a callback that records the last auto-backup time on the given app."""
++    import time
++
++    def record(backup):
++        app.config["last_auto_backup"] = time.time()
++
++    return record
++
++
+ def _render_page(
+     *,
+     saves: list[dict],
+@@ -61,6 +70,7 @@
+         backup_count=backup_count,
+         watcher_running=watcher_running,
+         csrf_token=csrf_token,
++        last_auto_backup=current_app.config.get("last_auto_backup", 0.0),
+     )
+ 
+ 
+@@ -253,12 +263,11 @@
+     flask_app.config["_saves_root_override"] = saves_root
+     flask_app.config["_backups_root_override"] = resolved_backups_root
+     flask_app.config["last_auto_backup"] = 0.0
++    on_auto_backup = make_auto_backup_recorder(flask_app)
+ 
+-    def _on_auto_backup(backup):
+-        import time
+-        flask_app.config["last_auto_backup"] = time.time()
++    _register_page_routes(flask_app)
++    from .routes_api import register_api_routes
+ 
+-    _register_page_routes(flask_app)
+     register_api_routes(flask_app)
+     if config_store.get("auto_start_watcher"):
+         start_watching_saves(
+@@ -266,7 +275,7 @@
+             config_store,
+             saves_root=saves_root,
+             backups_root=resolved_backups_root,
+-            on_backup=_on_auto_backup,
++            on_backup=on_auto_backup,
+         )
+     return flask_app
+ 
+diff --git a/src/pz_save_manager/routes_api.py b/src/pz_save_manager/routes_api.py
+index d7cdebbfa4a4407f7cff53001070b9e7236e730f..b003c433cdd3c10153994185db8c4f65f7229244
+--- a/src/pz_save_manager/routes_api.py
++++ b/src/pz_save_manager/routes_api.py
+@@ -8,6 +8,7 @@
+ from .backup_service import rename_save, restore_save
+ from .config import ConfigStore, default_store
+ from .csrf import _check_csrf
++from .gui import make_auto_backup_recorder
+ from .save_service import backup_save
+ from .saves import SaveNotFound
+ from .watcher import WatcherManager
+@@ -155,7 +156,7 @@
+         _config_store(),
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
+-        on_backup=lambda b: setattr(current_app.config, "last_auto_backup", __import__("time").time()),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     return jsonify({"ok": True, "message": f"Watcher started ({save_count} saves)"})
+ 
+@@ -186,6 +187,7 @@
+         backup_cooldown_seconds=cooldown,
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     if not manager.running:
+         manager.start()
+diff --git a/src/pz_save_manager/templates/index.html b/src/pz_save_manager/templates/index.html
+index cbe8de296bae53c2f9692c0eb088d9efa445d678..c5c80140737bd1b96de8d9c3cdec433a7b1c530f
+--- a/src/pz_save_manager/templates/index.html
++++ b/src/pz_save_manager/templates/index.html
+@@ -176,7 +176,7 @@
+ function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,backup_cooldown_minutes:document.getElementById("cfg-cooldown").value,max_auto_backups:document.getElementById("cfg-max-auto").value};doAction(null,'/api/config',data,'Settings saved!')}
+ function shutdown(){if(!confirm('Close PZ Save Manager?'))return;api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style="text-align:center;padding:4rem;color:#888"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'}).catch(function(){toast('Network error','var(--red)')})}
+ // Auto-refresh: poll for new auto-backups every 5 seconds
+-var _lastAuto = 0;
++var _lastAuto = {{ last_auto_backup }};
+ setInterval(function(){api("GET","/api/backup/last-auto").then(function(r){return r.json()}).then(function(d){var t=d.last_auto;if(t>_lastAuto){_lastAuto=t;location.reload()}}).catch(function(){})},5000);
+ </script>
+ </body>
+diff --git a/src/pz_save_manager/watcher.py b/src/pz_save_manager/watcher.py
+index 1df54d6c173b23217b4c32879c4bef07453385d6..781a478cdf13b20af2194b4ba09cb144eee04755
+--- a/src/pz_save_manager/watcher.py
++++ b/src/pz_save_manager/watcher.py
+@@ -156,7 +156,12 @@
+                         self._timer.daemon = True
+                         self._timer.start()
+         if backup is not None and callback:
+-            callback(backup)
++            try:
++                callback(backup)
++            except Exception:
++                import logging
++
++                logging.getLogger(__name__).error("auto-backup callback failed", exc_info=True)
+ 
+ 
+ class WatcherManager:
+diff --git a/tests/test_gui.py b/tests/test_gui.py
+index a2d37fce7797e60b00c00303cf48c0cd7ab01ea8..7b37e04b0f866fe363b320a6dcae3a514a03ad1b
+--- a/tests/test_gui.py
++++ b/tests/test_gui.py
+@@ -3,10 +3,10 @@
+ from pathlib import Path
+ 
+ import pytest
+-from flask import Flask
++from flask import Flask, has_request_context
+ 
+ from pz_save_manager.config import ConfigStore
+-from pz_save_manager.gui import _CSRF_TOKEN, create_app
++from pz_save_manager.gui import _CSRF_TOKEN, create_app, make_auto_backup_recorder
+ from pz_save_manager.routes_api import _manager as api_manager
+ 
+ 
+@@ -56,6 +56,18 @@
+         api_manager()
+ 
+ 
++def test_auto_backup_recorder_works_outside_request_context():
++    app = Flask(__name__)
++    app.config["last_auto_backup"] = 0.0
++    recorder = make_auto_backup_recorder(app)
++
++    assert not has_request_context()
++
++    recorder(object())
++
++    assert app.config["last_auto_backup"] > 0.0
++
++
+ def test_health_rejects_non_loopback_clients(client):
+     resp = client.get("/health", environ_base={"REMOTE_ADDR": "192.168.1.50"})
+     assert resp.status_code == 403
+
+diff --git a/src/pz_save_manager/gui.py b/src/pz_save_manager/gui.py
+index 7e333429ebed3fd803126b6b8f66b28479111625..ab4410205cfd7f5ce7343ed7aa4fb321808b9068
+--- a/src/pz_save_manager/gui.py
++++ b/src/pz_save_manager/gui.py
+@@ -14,7 +14,6 @@
+ from .csrf import CSRF_TOKEN as _CSRF_TOKEN
+ from .csrf import _generate_csrf_token
+ from .platforms import get_backups_root, get_saves_root
+-from .routes_api import register_api_routes
+ from .save_info import extract_all, player_info
+ from .saves import SaveGame, get_save_modified_time, list_saves
+ from .watcher import WatcherManager
+@@ -45,6 +44,16 @@
+     raise RuntimeError("Flask app is missing a WatcherManager dependency")
+ 
+ 
++def make_auto_backup_recorder(app: Flask):
++    """Return a callback that records the last auto-backup time on the given app."""
++    import time
++
++    def record(backup):
++        app.config["last_auto_backup"] = time.time()
++
++    return record
++
++
+ def _render_page(
+     *,
+     saves: list[dict],
+@@ -61,6 +70,7 @@
+         backup_count=backup_count,
+         watcher_running=watcher_running,
+         csrf_token=csrf_token,
++        last_auto_backup=current_app.config.get("last_auto_backup", 0.0),
+     )
+ 
+ 
+@@ -253,12 +263,11 @@
+     flask_app.config["_saves_root_override"] = saves_root
+     flask_app.config["_backups_root_override"] = resolved_backups_root
+     flask_app.config["last_auto_backup"] = 0.0
++    on_auto_backup = make_auto_backup_recorder(flask_app)
+ 
+-    def _on_auto_backup(backup):
+-        import time
+-        flask_app.config["last_auto_backup"] = time.time()
++    _register_page_routes(flask_app)
++    from .routes_api import register_api_routes
+ 
+-    _register_page_routes(flask_app)
+     register_api_routes(flask_app)
+     if config_store.get("auto_start_watcher"):
+         start_watching_saves(
+@@ -266,7 +275,7 @@
+             config_store,
+             saves_root=saves_root,
+             backups_root=resolved_backups_root,
+-            on_backup=_on_auto_backup,
++            on_backup=on_auto_backup,
+         )
+     return flask_app
+ 
+diff --git a/src/pz_save_manager/routes_api.py b/src/pz_save_manager/routes_api.py
+index d7cdebbfa4a4407f7cff53001070b9e7236e730f..b003c433cdd3c10153994185db8c4f65f7229244
+--- a/src/pz_save_manager/routes_api.py
++++ b/src/pz_save_manager/routes_api.py
+@@ -8,6 +8,7 @@
+ from .backup_service import rename_save, restore_save
+ from .config import ConfigStore, default_store
+ from .csrf import _check_csrf
++from .gui import make_auto_backup_recorder
+ from .save_service import backup_save
+ from .saves import SaveNotFound
+ from .watcher import WatcherManager
+@@ -155,7 +156,7 @@
+         _config_store(),
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
+-        on_backup=lambda b: setattr(current_app.config, "last_auto_backup", __import__("time").time()),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     return jsonify({"ok": True, "message": f"Watcher started ({save_count} saves)"})
+ 
+@@ -186,6 +187,7 @@
+         backup_cooldown_seconds=cooldown,
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     if not manager.running:
+         manager.start()
+diff --git a/src/pz_save_manager/templates/index.html b/src/pz_save_manager/templates/index.html
+index cbe8de296bae53c2f9692c0eb088d9efa445d678..c5c80140737bd1b96de8d9c3cdec433a7b1c530f
+--- a/src/pz_save_manager/templates/index.html
++++ b/src/pz_save_manager/templates/index.html
+@@ -176,7 +176,7 @@
+ function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,backup_cooldown_minutes:document.getElementById("cfg-cooldown").value,max_auto_backups:document.getElementById("cfg-max-auto").value};doAction(null,'/api/config',data,'Settings saved!')}
+ function shutdown(){if(!confirm('Close PZ Save Manager?'))return;api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style="text-align:center;padding:4rem;color:#888"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'}).catch(function(){toast('Network error','var(--red)')})}
+ // Auto-refresh: poll for new auto-backups every 5 seconds
+-var _lastAuto = 0;
++var _lastAuto = {{ last_auto_backup }};
+ setInterval(function(){api("GET","/api/backup/last-auto").then(function(r){return r.json()}).then(function(d){var t=d.last_auto;if(t>_lastAuto){_lastAuto=t;location.reload()}}).catch(function(){})},5000);
+ </script>
+ </body>
+diff --git a/src/pz_save_manager/watcher.py b/src/pz_save_manager/watcher.py
+index 1df54d6c173b23217b4c32879c4bef07453385d6..781a478cdf13b20af2194b4ba09cb144eee04755
+--- a/src/pz_save_manager/watcher.py
++++ b/src/pz_save_manager/watcher.py
+@@ -156,7 +156,12 @@
+                         self._timer.daemon = True
+                         self._timer.start()
+         if backup is not None and callback:
+-            callback(backup)
++            try:
++                callback(backup)
++            except Exception:
++                import logging
++
++                logging.getLogger(__name__).error("auto-backup callback failed", exc_info=True)
+ 
+ 
+ class WatcherManager:
+diff --git a/tests/test_gui.py b/tests/test_gui.py
+index a2d37fce7797e60b00c00303cf48c0cd7ab01ea8..7b37e04b0f866fe363b320a6dcae3a514a03ad1b
+--- a/tests/test_gui.py
++++ b/tests/test_gui.py
+@@ -3,10 +3,10 @@
+ from pathlib import Path
+ 
+ import pytest
+-from flask import Flask
++from flask import Flask, has_request_context
+ 
+ from pz_save_manager.config import ConfigStore
+-from pz_save_manager.gui import _CSRF_TOKEN, create_app
++from pz_save_manager.gui import _CSRF_TOKEN, create_app, make_auto_backup_recorder
+ from pz_save_manager.routes_api import _manager as api_manager
+ 
+ 
+@@ -56,6 +56,18 @@
+         api_manager()
+ 
+ 
++def test_auto_backup_recorder_works_outside_request_context():
++    app = Flask(__name__)
++    app.config["last_auto_backup"] = 0.0
++    recorder = make_auto_backup_recorder(app)
++
++    assert not has_request_context()
++
++    recorder(object())
++
++    assert app.config["last_auto_backup"] > 0.0
++
++
+ def test_health_rejects_non_loopback_clients(client):
+     resp = client.get("/health", environ_base={"REMOTE_ADDR": "192.168.1.50"})
+     assert resp.status_code == 403
+
+codex
+The regression test is in place. I’m running the required pytest command now; if the import restructuring exposed anything, I’ll fix it before handing back.
+exec
+/bin/bash -lc '.venv/bin/pytest tests/ -x -q' in /home/chpo/pz-save-manager
+diff --git a/src/pz_save_manager/gui.py b/src/pz_save_manager/gui.py
+index 7e333429ebed3fd803126b6b8f66b28479111625..ab4410205cfd7f5ce7343ed7aa4fb321808b9068
+--- a/src/pz_save_manager/gui.py
++++ b/src/pz_save_manager/gui.py
+@@ -14,7 +14,6 @@
+ from .csrf import CSRF_TOKEN as _CSRF_TOKEN
+ from .csrf import _generate_csrf_token
+ from .platforms import get_backups_root, get_saves_root
+-from .routes_api import register_api_routes
+ from .save_info import extract_all, player_info
+ from .saves import SaveGame, get_save_modified_time, list_saves
+ from .watcher import WatcherManager
+@@ -45,6 +44,16 @@
+     raise RuntimeError("Flask app is missing a WatcherManager dependency")
+ 
+ 
++def make_auto_backup_recorder(app: Flask):
++    """Return a callback that records the last auto-backup time on the given app."""
++    import time
++
++    def record(backup):
++        app.config["last_auto_backup"] = time.time()
++
++    return record
++
++
+ def _render_page(
+     *,
+     saves: list[dict],
+@@ -61,6 +70,7 @@
+         backup_count=backup_count,
+         watcher_running=watcher_running,
+         csrf_token=csrf_token,
++        last_auto_backup=current_app.config.get("last_auto_backup", 0.0),
+     )
+ 
+ 
+@@ -253,12 +263,11 @@
+     flask_app.config["_saves_root_override"] = saves_root
+     flask_app.config["_backups_root_override"] = resolved_backups_root
+     flask_app.config["last_auto_backup"] = 0.0
++    on_auto_backup = make_auto_backup_recorder(flask_app)
+ 
+-    def _on_auto_backup(backup):
+-        import time
+-        flask_app.config["last_auto_backup"] = time.time()
++    _register_page_routes(flask_app)
++    from .routes_api import register_api_routes
+ 
+-    _register_page_routes(flask_app)
+     register_api_routes(flask_app)
+     if config_store.get("auto_start_watcher"):
+         start_watching_saves(
+@@ -266,7 +275,7 @@
+             config_store,
+             saves_root=saves_root,
+             backups_root=resolved_backups_root,
+-            on_backup=_on_auto_backup,
++            on_backup=on_auto_backup,
+         )
+     return flask_app
+ 
+diff --git a/src/pz_save_manager/routes_api.py b/src/pz_save_manager/routes_api.py
+index d7cdebbfa4a4407f7cff53001070b9e7236e730f..b003c433cdd3c10153994185db8c4f65f7229244
+--- a/src/pz_save_manager/routes_api.py
++++ b/src/pz_save_manager/routes_api.py
+@@ -8,6 +8,7 @@
+ from .backup_service import rename_save, restore_save
+ from .config import ConfigStore, default_store
+ from .csrf import _check_csrf
++from .gui import make_auto_backup_recorder
+ from .save_service import backup_save
+ from .saves import SaveNotFound
+ from .watcher import WatcherManager
+@@ -155,7 +156,7 @@
+         _config_store(),
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
+-        on_backup=lambda b: setattr(current_app.config, "last_auto_backup", __import__("time").time()),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     return jsonify({"ok": True, "message": f"Watcher started ({save_count} saves)"})
+ 
+@@ -186,6 +187,7 @@
+         backup_cooldown_seconds=cooldown,
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     if not manager.running:
+         manager.start()
+diff --git a/src/pz_save_manager/templates/index.html b/src/pz_save_manager/templates/index.html
+index cbe8de296bae53c2f9692c0eb088d9efa445d678..c5c80140737bd1b96de8d9c3cdec433a7b1c530f
+--- a/src/pz_save_manager/templates/index.html
++++ b/src/pz_save_manager/templates/index.html
+@@ -176,7 +176,7 @@
+ function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,backup_cooldown_minutes:document.getElementById("cfg-cooldown").value,max_auto_backups:document.getElementById("cfg-max-auto").value};doAction(null,'/api/config',data,'Settings saved!')}
+ function shutdown(){if(!confirm('Close PZ Save Manager?'))return;api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style="text-align:center;padding:4rem;color:#888"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'}).catch(function(){toast('Network error','var(--red)')})}
+ // Auto-refresh: poll for new auto-backups every 5 seconds
+-var _lastAuto = 0;
++var _lastAuto = {{ last_auto_backup }};
+ setInterval(function(){api("GET","/api/backup/last-auto").then(function(r){return r.json()}).then(function(d){var t=d.last_auto;if(t>_lastAuto){_lastAuto=t;location.reload()}}).catch(function(){})},5000);
+ </script>
+ </body>
+diff --git a/src/pz_save_manager/watcher.py b/src/pz_save_manager/watcher.py
+index 1df54d6c173b23217b4c32879c4bef07453385d6..781a478cdf13b20af2194b4ba09cb144eee04755
+--- a/src/pz_save_manager/watcher.py
++++ b/src/pz_save_manager/watcher.py
+@@ -156,7 +156,12 @@
+                         self._timer.daemon = True
+                         self._timer.start()
+         if backup is not None and callback:
+-            callback(backup)
++            try:
++                callback(backup)
++            except Exception:
++                import logging
++
++                logging.getLogger(__name__).error("auto-backup callback failed", exc_info=True)
+ 
+ 
+ class WatcherManager:
+diff --git a/tests/test_gui.py b/tests/test_gui.py
+index a2d37fce7797e60b00c00303cf48c0cd7ab01ea8..7b37e04b0f866fe363b320a6dcae3a514a03ad1b
+--- a/tests/test_gui.py
++++ b/tests/test_gui.py
+@@ -3,10 +3,10 @@
+ from pathlib import Path
+ 
+ import pytest
+-from flask import Flask
++from flask import Flask, has_request_context
+ 
+ from pz_save_manager.config import ConfigStore
+-from pz_save_manager.gui import _CSRF_TOKEN, create_app
++from pz_save_manager.gui import _CSRF_TOKEN, create_app, make_auto_backup_recorder
+ from pz_save_manager.routes_api import _manager as api_manager
+ 
+ 
+@@ -56,6 +56,18 @@
+         api_manager()
+ 
+ 
++def test_auto_backup_recorder_works_outside_request_context():
++    app = Flask(__name__)
++    app.config["last_auto_backup"] = 0.0
++    recorder = make_auto_backup_recorder(app)
++
++    assert not has_request_context()
++
++    recorder(object())
++
++    assert app.config["last_auto_backup"] > 0.0
++
++
+ def test_health_rejects_non_loopback_clients(client):
+     resp = client.get("/health", environ_base={"REMOTE_ADDR": "192.168.1.50"})
+     assert resp.status_code == 403
+
+ succeeded in 1949ms:
+........................................................................ [ 94%]
+....                                                                     [100%]
+76 passed in 1.77s
+
+codex
+All tests pass: 76 tests completed successfully. I’m doing a final diff review to make sure the patch is limited to the requested files and test coverage.
+exec
+/bin/bash -lc 'git diff -- src/pz_save_manager/gui.py src/pz_save_manager/routes_api.py src/pz_save_manager/watcher.py src/pz_save_manager/templates/index.html tests/test_gui.py' in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+diff --git a/src/pz_save_manager/gui.py b/src/pz_save_manager/gui.py
+index 7e33342..ab44102 100644
+--- a/src/pz_save_manager/gui.py
++++ b/src/pz_save_manager/gui.py
+@@ -14,7 +14,6 @@ from .config import ConfigStore, default_store
+ from .csrf import CSRF_TOKEN as _CSRF_TOKEN
+ from .csrf import _generate_csrf_token
+ from .platforms import get_backups_root, get_saves_root
+-from .routes_api import register_api_routes
+ from .save_info import extract_all, player_info
+ from .saves import SaveGame, get_save_modified_time, list_saves
+ from .watcher import WatcherManager
+@@ -45,6 +44,16 @@ def _manager() -> WatcherManager:
+     raise RuntimeError("Flask app is missing a WatcherManager dependency")
+ 
+ 
++def make_auto_backup_recorder(app: Flask):
++    """Return a callback that records the last auto-backup time on the given app."""
++    import time
++
++    def record(backup):
++        app.config["last_auto_backup"] = time.time()
++
++    return record
++
++
+ def _render_page(
+     *,
+     saves: list[dict],
+@@ -61,6 +70,7 @@ def _render_page(
+         backup_count=backup_count,
+         watcher_running=watcher_running,
+         csrf_token=csrf_token,
++        last_auto_backup=current_app.config.get("last_auto_backup", 0.0),
+     )
+ 
+ 
+@@ -253,12 +263,11 @@ def create_app(
+     flask_app.config["_saves_root_override"] = saves_root
+     flask_app.config["_backups_root_override"] = resolved_backups_root
+     flask_app.config["last_auto_backup"] = 0.0
+-
+-    def _on_auto_backup(backup):
+-        import time
+-        flask_app.config["last_auto_backup"] = time.time()
++    on_auto_backup = make_auto_backup_recorder(flask_app)
+ 
+     _register_page_routes(flask_app)
++    from .routes_api import register_api_routes
++
+     register_api_routes(flask_app)
+     if config_store.get("auto_start_watcher"):
+         start_watching_saves(
+@@ -266,7 +275,7 @@ def create_app(
+             config_store,
+             saves_root=saves_root,
+             backups_root=resolved_backups_root,
+-            on_backup=_on_auto_backup,
++            on_backup=on_auto_backup,
+         )
+     return flask_app
+ 
+diff --git a/src/pz_save_manager/routes_api.py b/src/pz_save_manager/routes_api.py
+index d7cdebb..b003c43 100644
+--- a/src/pz_save_manager/routes_api.py
++++ b/src/pz_save_manager/routes_api.py
+@@ -8,6 +8,7 @@ from .backup import BackupError, BackupNotFound, delete_backup, get_backup, set_
+ from .backup_service import rename_save, restore_save
+ from .config import ConfigStore, default_store
+ from .csrf import _check_csrf
++from .gui import make_auto_backup_recorder
+ from .save_service import backup_save
+ from .saves import SaveNotFound
+ from .watcher import WatcherManager
+@@ -155,7 +156,7 @@ def api_watcher_toggle():
+         _config_store(),
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
+-        on_backup=lambda b: setattr(current_app.config, "last_auto_backup", __import__("time").time()),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     return jsonify({"ok": True, "message": f"Watcher started ({save_count} saves)"})
+ 
+@@ -186,6 +187,7 @@ def api_watcher_save():
+         backup_cooldown_seconds=cooldown,
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     if not manager.running:
+         manager.start()
+diff --git a/src/pz_save_manager/templates/index.html b/src/pz_save_manager/templates/index.html
+index cbe8de2..c5c8014 100644
+--- a/src/pz_save_manager/templates/index.html
++++ b/src/pz_save_manager/templates/index.html
+@@ -176,7 +176,7 @@ function toggleSettings(){var o=document.getElementById('settings-overlay');if(o
+ function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,backup_cooldown_minutes:document.getElementById("cfg-cooldown").value,max_auto_backups:document.getElementById("cfg-max-auto").value};doAction(null,'/api/config',data,'Settings saved!')}
+ function shutdown(){if(!confirm('Close PZ Save Manager?'))return;api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style="text-align:center;padding:4rem;color:#888"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'}).catch(function(){toast('Network error','var(--red)')})}
+ // Auto-refresh: poll for new auto-backups every 5 seconds
+-var _lastAuto = 0;
++var _lastAuto = {{ last_auto_backup }};
+ setInterval(function(){api("GET","/api/backup/last-auto").then(function(r){return r.json()}).then(function(d){var t=d.last_auto;if(t>_lastAuto){_lastAuto=t;location.reload()}}).catch(function(){})},5000);
+ </script>
+ </body>
+diff --git a/src/pz_save_manager/watcher.py b/src/pz_save_manager/watcher.py
+index 1df54d6..781a478 100644
+--- a/src/pz_save_manager/watcher.py
++++ b/src/pz_save_manager/watcher.py
+@@ -156,7 +156,12 @@ class SaveWatcher(FileSystemEventHandler):
+                         self._timer.daemon = True
+                         self._timer.start()
+         if backup is not None and callback:
+-            callback(backup)
++            try:
++                callback(backup)
++            except Exception:
++                import logging
++
++                logging.getLogger(__name__).error("auto-backup callback failed", exc_info=True)
+ 
+ 
+ class WatcherManager:
+diff --git a/tests/test_gui.py b/tests/test_gui.py
+index a2d37fc..7b37e04 100644
+--- a/tests/test_gui.py
++++ b/tests/test_gui.py
+@@ -3,10 +3,10 @@
+ from pathlib import Path
+ 
+ import pytest
+-from flask import Flask
++from flask import Flask, has_request_context
+ 
+ from pz_save_manager.config import ConfigStore
+-from pz_save_manager.gui import _CSRF_TOKEN, create_app
++from pz_save_manager.gui import _CSRF_TOKEN, create_app, make_auto_backup_recorder
+ from pz_save_manager.routes_api import _manager as api_manager
+ 
+ 
+@@ -56,6 +56,18 @@ def test_api_manager_fails_closed_without_dependency():
+         api_manager()
+ 
+ 
++def test_auto_backup_recorder_works_outside_request_context():
++    app = Flask(__name__)
++    app.config["last_auto_backup"] = 0.0
++    recorder = make_auto_backup_recorder(app)
++
++    assert not has_request_context()
++
++    recorder(object())
++
++    assert app.config["last_auto_backup"] > 0.0
++
++
+ def test_health_rejects_non_loopback_clients(client):
+     resp = client.get("/health", environ_base={"REMOTE_ADDR": "192.168.1.50"})
+     assert resp.status_code == 403
+
+exec
+/bin/bash -lc 'git status --short' in /home/chpo/pz-save-manager
+ succeeded in 0ms:
+ M src/pz_save_manager/gui.py
+ M src/pz_save_manager/routes_api.py
+ M src/pz_save_manager/templates/index.html
+ M src/pz_save_manager/watcher.py
+ M tests/test_gui.py
+?? .adversarial-loop-batch1/
+?? .adversarial-loop-batch2/
+?? .adversarial-loop-batch3/
+
+diff --git a/src/pz_save_manager/gui.py b/src/pz_save_manager/gui.py
+index 7e333429ebed3fd803126b6b8f66b28479111625..ab4410205cfd7f5ce7343ed7aa4fb321808b9068
+--- a/src/pz_save_manager/gui.py
++++ b/src/pz_save_manager/gui.py
+@@ -14,7 +14,6 @@
+ from .csrf import CSRF_TOKEN as _CSRF_TOKEN
+ from .csrf import _generate_csrf_token
+ from .platforms import get_backups_root, get_saves_root
+-from .routes_api import register_api_routes
+ from .save_info import extract_all, player_info
+ from .saves import SaveGame, get_save_modified_time, list_saves
+ from .watcher import WatcherManager
+@@ -45,6 +44,16 @@
+     raise RuntimeError("Flask app is missing a WatcherManager dependency")
+ 
+ 
++def make_auto_backup_recorder(app: Flask):
++    """Return a callback that records the last auto-backup time on the given app."""
++    import time
++
++    def record(backup):
++        app.config["last_auto_backup"] = time.time()
++
++    return record
++
++
+ def _render_page(
+     *,
+     saves: list[dict],
+@@ -61,6 +70,7 @@
+         backup_count=backup_count,
+         watcher_running=watcher_running,
+         csrf_token=csrf_token,
++        last_auto_backup=current_app.config.get("last_auto_backup", 0.0),
+     )
+ 
+ 
+@@ -253,12 +263,11 @@
+     flask_app.config["_saves_root_override"] = saves_root
+     flask_app.config["_backups_root_override"] = resolved_backups_root
+     flask_app.config["last_auto_backup"] = 0.0
++    on_auto_backup = make_auto_backup_recorder(flask_app)
+ 
+-    def _on_auto_backup(backup):
+-        import time
+-        flask_app.config["last_auto_backup"] = time.time()
++    _register_page_routes(flask_app)
++    from .routes_api import register_api_routes
+ 
+-    _register_page_routes(flask_app)
+     register_api_routes(flask_app)
+     if config_store.get("auto_start_watcher"):
+         start_watching_saves(
+@@ -266,7 +275,7 @@
+             config_store,
+             saves_root=saves_root,
+             backups_root=resolved_backups_root,
+-            on_backup=_on_auto_backup,
++            on_backup=on_auto_backup,
+         )
+     return flask_app
+ 
+diff --git a/src/pz_save_manager/routes_api.py b/src/pz_save_manager/routes_api.py
+index d7cdebbfa4a4407f7cff53001070b9e7236e730f..b003c433cdd3c10153994185db8c4f65f7229244
+--- a/src/pz_save_manager/routes_api.py
++++ b/src/pz_save_manager/routes_api.py
+@@ -8,6 +8,7 @@
+ from .backup_service import rename_save, restore_save
+ from .config import ConfigStore, default_store
+ from .csrf import _check_csrf
++from .gui import make_auto_backup_recorder
+ from .save_service import backup_save
+ from .saves import SaveNotFound
+ from .watcher import WatcherManager
+@@ -155,7 +156,7 @@
+         _config_store(),
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
+-        on_backup=lambda b: setattr(current_app.config, "last_auto_backup", __import__("time").time()),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     return jsonify({"ok": True, "message": f"Watcher started ({save_count} saves)"})
+ 
+@@ -186,6 +187,7 @@
+         backup_cooldown_seconds=cooldown,
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     if not manager.running:
+         manager.start()
+diff --git a/src/pz_save_manager/templates/index.html b/src/pz_save_manager/templates/index.html
+index cbe8de296bae53c2f9692c0eb088d9efa445d678..c5c80140737bd1b96de8d9c3cdec433a7b1c530f
+--- a/src/pz_save_manager/templates/index.html
++++ b/src/pz_save_manager/templates/index.html
+@@ -176,7 +176,7 @@
+ function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,backup_cooldown_minutes:document.getElementById("cfg-cooldown").value,max_auto_backups:document.getElementById("cfg-max-auto").value};doAction(null,'/api/config',data,'Settings saved!')}
+ function shutdown(){if(!confirm('Close PZ Save Manager?'))return;api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style="text-align:center;padding:4rem;color:#888"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'}).catch(function(){toast('Network error','var(--red)')})}
+ // Auto-refresh: poll for new auto-backups every 5 seconds
+-var _lastAuto = 0;
++var _lastAuto = {{ last_auto_backup }};
+ setInterval(function(){api("GET","/api/backup/last-auto").then(function(r){return r.json()}).then(function(d){var t=d.last_auto;if(t>_lastAuto){_lastAuto=t;location.reload()}}).catch(function(){})},5000);
+ </script>
+ </body>
+diff --git a/src/pz_save_manager/watcher.py b/src/pz_save_manager/watcher.py
+index 1df54d6c173b23217b4c32879c4bef07453385d6..781a478cdf13b20af2194b4ba09cb144eee04755
+--- a/src/pz_save_manager/watcher.py
++++ b/src/pz_save_manager/watcher.py
+@@ -156,7 +156,12 @@
+                         self._timer.daemon = True
+                         self._timer.start()
+         if backup is not None and callback:
+-            callback(backup)
++            try:
++                callback(backup)
++            except Exception:
++                import logging
++
++                logging.getLogger(__name__).error("auto-backup callback failed", exc_info=True)
+ 
+ 
+ class WatcherManager:
+diff --git a/tests/test_gui.py b/tests/test_gui.py
+index a2d37fce7797e60b00c00303cf48c0cd7ab01ea8..7b37e04b0f866fe363b320a6dcae3a514a03ad1b
+--- a/tests/test_gui.py
++++ b/tests/test_gui.py
+@@ -3,10 +3,10 @@
+ from pathlib import Path
+ 
+ import pytest
+-from flask import Flask
++from flask import Flask, has_request_context
+ 
+ from pz_save_manager.config import ConfigStore
+-from pz_save_manager.gui import _CSRF_TOKEN, create_app
++from pz_save_manager.gui import _CSRF_TOKEN, create_app, make_auto_backup_recorder
+ from pz_save_manager.routes_api import _manager as api_manager
+ 
+ 
+@@ -56,6 +56,18 @@
+         api_manager()
+ 
+ 
++def test_auto_backup_recorder_works_outside_request_context():
++    app = Flask(__name__)
++    app.config["last_auto_backup"] = 0.0
++    recorder = make_auto_backup_recorder(app)
++
++    assert not has_request_context()
++
++    recorder(object())
++
++    assert app.config["last_auto_backup"] > 0.0
++
++
+ def test_health_rejects_non_loopback_clients(client):
+     resp = client.get("/health", environ_base={"REMOTE_ADDR": "192.168.1.50"})
+     assert resp.status_code == 403
+
+codex
+The diff is limited to the requested implementation plus the new test. I noticed the new helper can be typed more clearly, so I’m tightening that before the final verification.
+apply patch
+patch: completed
+/home/chpo/pz-save-manager/src/pz_save_manager/gui.py
+diff --git a/src/pz_save_manager/gui.py b/src/pz_save_manager/gui.py
+index 7e333429ebed3fd803126b6b8f66b28479111625..4d2c36f621c16158658ccd4c1bcb30fc0e1cfbbb
+--- a/src/pz_save_manager/gui.py
++++ b/src/pz_save_manager/gui.py
+@@ -2,6 +2,7 @@
+ 
+ from __future__ import annotations
+ 
++from collections.abc import Callable
+ from datetime import datetime
+ from html import escape
+ from ipaddress import ip_address
+@@ -14,7 +15,6 @@
+ from .csrf import CSRF_TOKEN as _CSRF_TOKEN
+ from .csrf import _generate_csrf_token
+ from .platforms import get_backups_root, get_saves_root
+-from .routes_api import register_api_routes
+ from .save_info import extract_all, player_info
+ from .saves import SaveGame, get_save_modified_time, list_saves
+ from .watcher import WatcherManager
+@@ -45,6 +45,16 @@
+     raise RuntimeError("Flask app is missing a WatcherManager dependency")
+ 
+ 
++def make_auto_backup_recorder(app: Flask) -> Callable[[object], None]:
++    """Return a callback that records the last auto-backup time on the given app."""
++    import time
++
++    def record(backup: object) -> None:
++        app.config["last_auto_backup"] = time.time()
++
++    return record
++
++
+ def _render_page(
+     *,
+     saves: list[dict],
+@@ -61,6 +71,7 @@
+         backup_count=backup_count,
+         watcher_running=watcher_running,
+         csrf_token=csrf_token,
++        last_auto_backup=current_app.config.get("last_auto_backup", 0.0),
+     )
+ 
+ 
+@@ -253,12 +264,11 @@
+     flask_app.config["_saves_root_override"] = saves_root
+     flask_app.config["_backups_root_override"] = resolved_backups_root
+     flask_app.config["last_auto_backup"] = 0.0
+-
+-    def _on_auto_backup(backup):
+-        import time
+-        flask_app.config["last_auto_backup"] = time.time()
++    on_auto_backup = make_auto_backup_recorder(flask_app)
+ 
+     _register_page_routes(flask_app)
++    from .routes_api import register_api_routes
++
+     register_api_routes(flask_app)
+     if config_store.get("auto_start_watcher"):
+         start_watching_saves(
+@@ -266,7 +276,7 @@
+             config_store,
+             saves_root=saves_root,
+             backups_root=resolved_backups_root,
+-            on_backup=_on_auto_backup,
++            on_backup=on_auto_backup,
+         )
+     return flask_app
+ 
+diff --git a/src/pz_save_manager/routes_api.py b/src/pz_save_manager/routes_api.py
+index d7cdebbfa4a4407f7cff53001070b9e7236e730f..b003c433cdd3c10153994185db8c4f65f7229244
+--- a/src/pz_save_manager/routes_api.py
++++ b/src/pz_save_manager/routes_api.py
+@@ -8,6 +8,7 @@
+ from .backup_service import rename_save, restore_save
+ from .config import ConfigStore, default_store
+ from .csrf import _check_csrf
++from .gui import make_auto_backup_recorder
+ from .save_service import backup_save
+ from .saves import SaveNotFound
+ from .watcher import WatcherManager
+@@ -155,7 +156,7 @@
+         _config_store(),
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
+-        on_backup=lambda b: setattr(current_app.config, "last_auto_backup", __import__("time").time()),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     return jsonify({"ok": True, "message": f"Watcher started ({save_count} saves)"})
+ 
+@@ -186,6 +187,7 @@
+         backup_cooldown_seconds=cooldown,
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     if not manager.running:
+         manager.start()
+diff --git a/src/pz_save_manager/templates/index.html b/src/pz_save_manager/templates/index.html
+index cbe8de296bae53c2f9692c0eb088d9efa445d678..c5c80140737bd1b96de8d9c3cdec433a7b1c530f
+--- a/src/pz_save_manager/templates/index.html
++++ b/src/pz_save_manager/templates/index.html
+@@ -176,7 +176,7 @@
+ function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,backup_cooldown_minutes:document.getElementById("cfg-cooldown").value,max_auto_backups:document.getElementById("cfg-max-auto").value};doAction(null,'/api/config',data,'Settings saved!')}
+ function shutdown(){if(!confirm('Close PZ Save Manager?'))return;api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style="text-align:center;padding:4rem;color:#888"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'}).catch(function(){toast('Network error','var(--red)')})}
+ // Auto-refresh: poll for new auto-backups every 5 seconds
+-var _lastAuto = 0;
++var _lastAuto = {{ last_auto_backup }};
+ setInterval(function(){api("GET","/api/backup/last-auto").then(function(r){return r.json()}).then(function(d){var t=d.last_auto;if(t>_lastAuto){_lastAuto=t;location.reload()}}).catch(function(){})},5000);
+ </script>
+ </body>
+diff --git a/src/pz_save_manager/watcher.py b/src/pz_save_manager/watcher.py
+index 1df54d6c173b23217b4c32879c4bef07453385d6..781a478cdf13b20af2194b4ba09cb144eee04755
+--- a/src/pz_save_manager/watcher.py
++++ b/src/pz_save_manager/watcher.py
+@@ -156,7 +156,12 @@
+                         self._timer.daemon = True
+                         self._timer.start()
+         if backup is not None and callback:
+-            callback(backup)
++            try:
++                callback(backup)
++            except Exception:
++                import logging
++
++                logging.getLogger(__name__).error("auto-backup callback failed", exc_info=True)
+ 
+ 
+ class WatcherManager:
+diff --git a/tests/test_gui.py b/tests/test_gui.py
+index a2d37fce7797e60b00c00303cf48c0cd7ab01ea8..7b37e04b0f866fe363b320a6dcae3a514a03ad1b
+--- a/tests/test_gui.py
++++ b/tests/test_gui.py
+@@ -3,10 +3,10 @@
+ from pathlib import Path
+ 
+ import pytest
+-from flask import Flask
++from flask import Flask, has_request_context
+ 
+ from pz_save_manager.config import ConfigStore
+-from pz_save_manager.gui import _CSRF_TOKEN, create_app
++from pz_save_manager.gui import _CSRF_TOKEN, create_app, make_auto_backup_recorder
+ from pz_save_manager.routes_api import _manager as api_manager
+ 
+ 
+@@ -56,6 +56,18 @@
+         api_manager()
+ 
+ 
++def test_auto_backup_recorder_works_outside_request_context():
++    app = Flask(__name__)
++    app.config["last_auto_backup"] = 0.0
++    recorder = make_auto_backup_recorder(app)
++
++    assert not has_request_context()
++
++    recorder(object())
++
++    assert app.config["last_auto_backup"] > 0.0
++
++
+ def test_health_rejects_non_loopback_clients(client):
+     resp = client.get("/health", environ_base={"REMOTE_ADDR": "192.168.1.50"})
+     assert resp.status_code == 403
+
+diff --git a/src/pz_save_manager/gui.py b/src/pz_save_manager/gui.py
+index 7e333429ebed3fd803126b6b8f66b28479111625..4d2c36f621c16158658ccd4c1bcb30fc0e1cfbbb
+--- a/src/pz_save_manager/gui.py
++++ b/src/pz_save_manager/gui.py
+@@ -2,6 +2,7 @@
+ 
+ from __future__ import annotations
+ 
++from collections.abc import Callable
+ from datetime import datetime
+ from html import escape
+ from ipaddress import ip_address
+@@ -14,7 +15,6 @@
+ from .csrf import CSRF_TOKEN as _CSRF_TOKEN
+ from .csrf import _generate_csrf_token
+ from .platforms import get_backups_root, get_saves_root
+-from .routes_api import register_api_routes
+ from .save_info import extract_all, player_info
+ from .saves import SaveGame, get_save_modified_time, list_saves
+ from .watcher import WatcherManager
+@@ -45,6 +45,16 @@
+     raise RuntimeError("Flask app is missing a WatcherManager dependency")
+ 
+ 
++def make_auto_backup_recorder(app: Flask) -> Callable[[object], None]:
++    """Return a callback that records the last auto-backup time on the given app."""
++    import time
++
++    def record(backup: object) -> None:
++        app.config["last_auto_backup"] = time.time()
++
++    return record
++
++
+ def _render_page(
+     *,
+     saves: list[dict],
+@@ -61,6 +71,7 @@
+         backup_count=backup_count,
+         watcher_running=watcher_running,
+         csrf_token=csrf_token,
++        last_auto_backup=current_app.config.get("last_auto_backup", 0.0),
+     )
+ 
+ 
+@@ -253,12 +264,11 @@
+     flask_app.config["_saves_root_override"] = saves_root
+     flask_app.config["_backups_root_override"] = resolved_backups_root
+     flask_app.config["last_auto_backup"] = 0.0
+-
+-    def _on_auto_backup(backup):
+-        import time
+-        flask_app.config["last_auto_backup"] = time.time()
++    on_auto_backup = make_auto_backup_recorder(flask_app)
+ 
+     _register_page_routes(flask_app)
++    from .routes_api import register_api_routes
++
+     register_api_routes(flask_app)
+     if config_store.get("auto_start_watcher"):
+         start_watching_saves(
+@@ -266,7 +276,7 @@
+             config_store,
+             saves_root=saves_root,
+             backups_root=resolved_backups_root,
+-            on_backup=_on_auto_backup,
++            on_backup=on_auto_backup,
+         )
+     return flask_app
+ 
+diff --git a/src/pz_save_manager/routes_api.py b/src/pz_save_manager/routes_api.py
+index d7cdebbfa4a4407f7cff53001070b9e7236e730f..b003c433cdd3c10153994185db8c4f65f7229244
+--- a/src/pz_save_manager/routes_api.py
++++ b/src/pz_save_manager/routes_api.py
+@@ -8,6 +8,7 @@
+ from .backup_service import rename_save, restore_save
+ from .config import ConfigStore, default_store
+ from .csrf import _check_csrf
++from .gui import make_auto_backup_recorder
+ from .save_service import backup_save
+ from .saves import SaveNotFound
+ from .watcher import WatcherManager
+@@ -155,7 +156,7 @@
+         _config_store(),
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
+-        on_backup=lambda b: setattr(current_app.config, "last_auto_backup", __import__("time").time()),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     return jsonify({"ok": True, "message": f"Watcher started ({save_count} saves)"})
+ 
+@@ -186,6 +187,7 @@
+         backup_cooldown_seconds=cooldown,
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     if not manager.running:
+         manager.start()
+diff --git a/src/pz_save_manager/templates/index.html b/src/pz_save_manager/templates/index.html
+index cbe8de296bae53c2f9692c0eb088d9efa445d678..c5c80140737bd1b96de8d9c3cdec433a7b1c530f
+--- a/src/pz_save_manager/templates/index.html
++++ b/src/pz_save_manager/templates/index.html
+@@ -176,7 +176,7 @@
+ function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,backup_cooldown_minutes:document.getElementById("cfg-cooldown").value,max_auto_backups:document.getElementById("cfg-max-auto").value};doAction(null,'/api/config',data,'Settings saved!')}
+ function shutdown(){if(!confirm('Close PZ Save Manager?'))return;api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style="text-align:center;padding:4rem;color:#888"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'}).catch(function(){toast('Network error','var(--red)')})}
+ // Auto-refresh: poll for new auto-backups every 5 seconds
+-var _lastAuto = 0;
++var _lastAuto = {{ last_auto_backup }};
+ setInterval(function(){api("GET","/api/backup/last-auto").then(function(r){return r.json()}).then(function(d){var t=d.last_auto;if(t>_lastAuto){_lastAuto=t;location.reload()}}).catch(function(){})},5000);
+ </script>
+ </body>
+diff --git a/src/pz_save_manager/watcher.py b/src/pz_save_manager/watcher.py
+index 1df54d6c173b23217b4c32879c4bef07453385d6..781a478cdf13b20af2194b4ba09cb144eee04755
+--- a/src/pz_save_manager/watcher.py
++++ b/src/pz_save_manager/watcher.py
+@@ -156,7 +156,12 @@
+                         self._timer.daemon = True
+                         self._timer.start()
+         if backup is not None and callback:
+-            callback(backup)
++            try:
++                callback(backup)
++            except Exception:
++                import logging
++
++                logging.getLogger(__name__).error("auto-backup callback failed", exc_info=True)
+ 
+ 
+ class WatcherManager:
+diff --git a/tests/test_gui.py b/tests/test_gui.py
+index a2d37fce7797e60b00c00303cf48c0cd7ab01ea8..7b37e04b0f866fe363b320a6dcae3a514a03ad1b
+--- a/tests/test_gui.py
++++ b/tests/test_gui.py
+@@ -3,10 +3,10 @@
+ from pathlib import Path
+ 
+ import pytest
+-from flask import Flask
++from flask import Flask, has_request_context
+ 
+ from pz_save_manager.config import ConfigStore
+-from pz_save_manager.gui import _CSRF_TOKEN, create_app
++from pz_save_manager.gui import _CSRF_TOKEN, create_app, make_auto_backup_recorder
+ from pz_save_manager.routes_api import _manager as api_manager
+ 
+ 
+@@ -56,6 +56,18 @@
+         api_manager()
+ 
+ 
++def test_auto_backup_recorder_works_outside_request_context():
++    app = Flask(__name__)
++    app.config["last_auto_backup"] = 0.0
++    recorder = make_auto_backup_recorder(app)
++
++    assert not has_request_context()
++
++    recorder(object())
++
++    assert app.config["last_auto_backup"] > 0.0
++
++
+ def test_health_rejects_non_loopback_clients(client):
+     resp = client.get("/health", environ_base={"REMOTE_ADDR": "192.168.1.50"})
+     assert resp.status_code == 403
+
+codex
+The helper now has an explicit callback type. I’m rerunning the full suite once more after that final cleanup.
+exec
+/bin/bash -lc '.venv/bin/pytest tests/ -x -q' in /home/chpo/pz-save-manager
+diff --git a/src/pz_save_manager/gui.py b/src/pz_save_manager/gui.py
+index 7e333429ebed3fd803126b6b8f66b28479111625..4d2c36f621c16158658ccd4c1bcb30fc0e1cfbbb
+--- a/src/pz_save_manager/gui.py
++++ b/src/pz_save_manager/gui.py
+@@ -2,6 +2,7 @@
+ 
+ from __future__ import annotations
+ 
++from collections.abc import Callable
+ from datetime import datetime
+ from html import escape
+ from ipaddress import ip_address
+@@ -14,7 +15,6 @@
+ from .csrf import CSRF_TOKEN as _CSRF_TOKEN
+ from .csrf import _generate_csrf_token
+ from .platforms import get_backups_root, get_saves_root
+-from .routes_api import register_api_routes
+ from .save_info import extract_all, player_info
+ from .saves import SaveGame, get_save_modified_time, list_saves
+ from .watcher import WatcherManager
+@@ -45,6 +45,16 @@
+     raise RuntimeError("Flask app is missing a WatcherManager dependency")
+ 
+ 
++def make_auto_backup_recorder(app: Flask) -> Callable[[object], None]:
++    """Return a callback that records the last auto-backup time on the given app."""
++    import time
++
++    def record(backup: object) -> None:
++        app.config["last_auto_backup"] = time.time()
++
++    return record
++
++
+ def _render_page(
+     *,
+     saves: list[dict],
+@@ -61,6 +71,7 @@
+         backup_count=backup_count,
+         watcher_running=watcher_running,
+         csrf_token=csrf_token,
++        last_auto_backup=current_app.config.get("last_auto_backup", 0.0),
+     )
+ 
+ 
+@@ -253,12 +264,11 @@
+     flask_app.config["_saves_root_override"] = saves_root
+     flask_app.config["_backups_root_override"] = resolved_backups_root
+     flask_app.config["last_auto_backup"] = 0.0
+-
+-    def _on_auto_backup(backup):
+-        import time
+-        flask_app.config["last_auto_backup"] = time.time()
++    on_auto_backup = make_auto_backup_recorder(flask_app)
+ 
+     _register_page_routes(flask_app)
++    from .routes_api import register_api_routes
++
+     register_api_routes(flask_app)
+     if config_store.get("auto_start_watcher"):
+         start_watching_saves(
+@@ -266,7 +276,7 @@
+             config_store,
+             saves_root=saves_root,
+             backups_root=resolved_backups_root,
+-            on_backup=_on_auto_backup,
++            on_backup=on_auto_backup,
+         )
+     return flask_app
+ 
+diff --git a/src/pz_save_manager/routes_api.py b/src/pz_save_manager/routes_api.py
+index d7cdebbfa4a4407f7cff53001070b9e7236e730f..b003c433cdd3c10153994185db8c4f65f7229244
+--- a/src/pz_save_manager/routes_api.py
++++ b/src/pz_save_manager/routes_api.py
+@@ -8,6 +8,7 @@
+ from .backup_service import rename_save, restore_save
+ from .config import ConfigStore, default_store
+ from .csrf import _check_csrf
++from .gui import make_auto_backup_recorder
+ from .save_service import backup_save
+ from .saves import SaveNotFound
+ from .watcher import WatcherManager
+@@ -155,7 +156,7 @@
+         _config_store(),
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
+-        on_backup=lambda b: setattr(current_app.config, "last_auto_backup", __import__("time").time()),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     return jsonify({"ok": True, "message": f"Watcher started ({save_count} saves)"})
+ 
+@@ -186,6 +187,7 @@
+         backup_cooldown_seconds=cooldown,
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     if not manager.running:
+         manager.start()
+diff --git a/src/pz_save_manager/templates/index.html b/src/pz_save_manager/templates/index.html
+index cbe8de296bae53c2f9692c0eb088d9efa445d678..c5c80140737bd1b96de8d9c3cdec433a7b1c530f
+--- a/src/pz_save_manager/templates/index.html
++++ b/src/pz_save_manager/templates/index.html
+@@ -176,7 +176,7 @@
+ function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,backup_cooldown_minutes:document.getElementById("cfg-cooldown").value,max_auto_backups:document.getElementById("cfg-max-auto").value};doAction(null,'/api/config',data,'Settings saved!')}
+ function shutdown(){if(!confirm('Close PZ Save Manager?'))return;api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style="text-align:center;padding:4rem;color:#888"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'}).catch(function(){toast('Network error','var(--red)')})}
+ // Auto-refresh: poll for new auto-backups every 5 seconds
+-var _lastAuto = 0;
++var _lastAuto = {{ last_auto_backup }};
+ setInterval(function(){api("GET","/api/backup/last-auto").then(function(r){return r.json()}).then(function(d){var t=d.last_auto;if(t>_lastAuto){_lastAuto=t;location.reload()}}).catch(function(){})},5000);
+ </script>
+ </body>
+diff --git a/src/pz_save_manager/watcher.py b/src/pz_save_manager/watcher.py
+index 1df54d6c173b23217b4c32879c4bef07453385d6..781a478cdf13b20af2194b4ba09cb144eee04755
+--- a/src/pz_save_manager/watcher.py
++++ b/src/pz_save_manager/watcher.py
+@@ -156,7 +156,12 @@
+                         self._timer.daemon = True
+                         self._timer.start()
+         if backup is not None and callback:
+-            callback(backup)
++            try:
++                callback(backup)
++            except Exception:
++                import logging
++
++                logging.getLogger(__name__).error("auto-backup callback failed", exc_info=True)
+ 
+ 
+ class WatcherManager:
+diff --git a/tests/test_gui.py b/tests/test_gui.py
+index a2d37fce7797e60b00c00303cf48c0cd7ab01ea8..7b37e04b0f866fe363b320a6dcae3a514a03ad1b
+--- a/tests/test_gui.py
++++ b/tests/test_gui.py
+@@ -3,10 +3,10 @@
+ from pathlib import Path
+ 
+ import pytest
+-from flask import Flask
++from flask import Flask, has_request_context
+ 
+ from pz_save_manager.config import ConfigStore
+-from pz_save_manager.gui import _CSRF_TOKEN, create_app
++from pz_save_manager.gui import _CSRF_TOKEN, create_app, make_auto_backup_recorder
+ from pz_save_manager.routes_api import _manager as api_manager
+ 
+ 
+@@ -56,6 +56,18 @@
+         api_manager()
+ 
+ 
++def test_auto_backup_recorder_works_outside_request_context():
++    app = Flask(__name__)
++    app.config["last_auto_backup"] = 0.0
++    recorder = make_auto_backup_recorder(app)
++
++    assert not has_request_context()
++
++    recorder(object())
++
++    assert app.config["last_auto_backup"] > 0.0
++
++
+ def test_health_rejects_non_loopback_clients(client):
+     resp = client.get("/health", environ_base={"REMOTE_ADDR": "192.168.1.50"})
+     assert resp.status_code == 403
+
+ succeeded in 1861ms:
+........................................................................ [ 94%]
+....                                                                     [100%]
+76 passed in 1.73s
+
+codex
+Implemented the batch.
+
+Changed:
+- Added `make_auto_backup_recorder()` in [gui.py](/home/chpo/pz-save-manager/src/pz_save_manager/gui.py).
+- Reused it in `create_app()`, `/api/watcher/toggle`, and `/api/watcher/save`.
+- Passed `last_auto_backup` into the template and seeded `_lastAuto` from it to stop the reload loop.
+- Wrapped watcher auto-backup callback execution in `try/except` with error logging.
+- Added a regression test proving the recorder works outside request context.
+
+Verification:
+- `.venv/bin/pytest tests/ -x -q`
+- Result: `76 passed in 1.73s`
+
+I also moved the `register_api_routes` import inside `create_app()` to avoid a circular import now that `routes_api.py` imports the shared recorder from `gui.py`.
+diff --git a/src/pz_save_manager/gui.py b/src/pz_save_manager/gui.py
+index 7e333429ebed3fd803126b6b8f66b28479111625..4d2c36f621c16158658ccd4c1bcb30fc0e1cfbbb
+--- a/src/pz_save_manager/gui.py
++++ b/src/pz_save_manager/gui.py
+@@ -2,6 +2,7 @@
+ 
+ from __future__ import annotations
+ 
++from collections.abc import Callable
+ from datetime import datetime
+ from html import escape
+ from ipaddress import ip_address
+@@ -14,7 +15,6 @@
+ from .csrf import CSRF_TOKEN as _CSRF_TOKEN
+ from .csrf import _generate_csrf_token
+ from .platforms import get_backups_root, get_saves_root
+-from .routes_api import register_api_routes
+ from .save_info import extract_all, player_info
+ from .saves import SaveGame, get_save_modified_time, list_saves
+ from .watcher import WatcherManager
+@@ -45,6 +45,16 @@
+     raise RuntimeError("Flask app is missing a WatcherManager dependency")
+ 
+ 
++def make_auto_backup_recorder(app: Flask) -> Callable[[object], None]:
++    """Return a callback that records the last auto-backup time on the given app."""
++    import time
++
++    def record(backup: object) -> None:
++        app.config["last_auto_backup"] = time.time()
++
++    return record
++
++
+ def _render_page(
+     *,
+     saves: list[dict],
+@@ -61,6 +71,7 @@
+         backup_count=backup_count,
+         watcher_running=watcher_running,
+         csrf_token=csrf_token,
++        last_auto_backup=current_app.config.get("last_auto_backup", 0.0),
+     )
+ 
+ 
+@@ -253,12 +264,11 @@
+     flask_app.config["_saves_root_override"] = saves_root
+     flask_app.config["_backups_root_override"] = resolved_backups_root
+     flask_app.config["last_auto_backup"] = 0.0
+-
+-    def _on_auto_backup(backup):
+-        import time
+-        flask_app.config["last_auto_backup"] = time.time()
++    on_auto_backup = make_auto_backup_recorder(flask_app)
+ 
+     _register_page_routes(flask_app)
++    from .routes_api import register_api_routes
++
+     register_api_routes(flask_app)
+     if config_store.get("auto_start_watcher"):
+         start_watching_saves(
+@@ -266,7 +276,7 @@
+             config_store,
+             saves_root=saves_root,
+             backups_root=resolved_backups_root,
+-            on_backup=_on_auto_backup,
++            on_backup=on_auto_backup,
+         )
+     return flask_app
+ 
+diff --git a/src/pz_save_manager/routes_api.py b/src/pz_save_manager/routes_api.py
+index d7cdebbfa4a4407f7cff53001070b9e7236e730f..b003c433cdd3c10153994185db8c4f65f7229244
+--- a/src/pz_save_manager/routes_api.py
++++ b/src/pz_save_manager/routes_api.py
+@@ -8,6 +8,7 @@
+ from .backup_service import rename_save, restore_save
+ from .config import ConfigStore, default_store
+ from .csrf import _check_csrf
++from .gui import make_auto_backup_recorder
+ from .save_service import backup_save
+ from .saves import SaveNotFound
+ from .watcher import WatcherManager
+@@ -155,7 +156,7 @@
+         _config_store(),
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
+-        on_backup=lambda b: setattr(current_app.config, "last_auto_backup", __import__("time").time()),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     return jsonify({"ok": True, "message": f"Watcher started ({save_count} saves)"})
+ 
+@@ -186,6 +187,7 @@
+         backup_cooldown_seconds=cooldown,
+         saves_root=_saves_root(),
+         backups_root=_backups_root(),
++        on_backup=make_auto_backup_recorder(current_app._get_current_object()),
+     )
+     if not manager.running:
+         manager.start()
+diff --git a/src/pz_save_manager/templates/index.html b/src/pz_save_manager/templates/index.html
+index cbe8de296bae53c2f9692c0eb088d9efa445d678..c5c80140737bd1b96de8d9c3cdec433a7b1c530f
+--- a/src/pz_save_manager/templates/index.html
++++ b/src/pz_save_manager/templates/index.html
+@@ -176,7 +176,7 @@
+ function saveSettings(){var data={backups_dir:document.getElementById('cfg-backups-dir').value,backup_cooldown_minutes:document.getElementById("cfg-cooldown").value,max_auto_backups:document.getElementById("cfg-max-auto").value};doAction(null,'/api/config',data,'Settings saved!')}
+ function shutdown(){if(!confirm('Close PZ Save Manager?'))return;api('POST','/api/shutdown').then(function(){document.body.innerHTML='<div style="text-align:center;padding:4rem;color:#888"><h2>👋 Goodbye</h2><p>You can close this window.</p></div>'}).catch(function(){toast('Network error','var(--red)')})}
+ // Auto-refresh: poll for new auto-backups every 5 seconds
+-var _lastAuto = 0;
++var _lastAuto = {{ last_auto_backup }};
+ setInterval(function(){api("GET","/api/backup/last-auto").then(function(r){return r.json()}).then(function(d){var t=d.last_auto;if(t>_lastAuto){_lastAuto=t;location.reload()}}).catch(function(){})},5000);
+ </script>
+ </body>
+diff --git a/src/pz_save_manager/watcher.py b/src/pz_save_manager/watcher.py
+index 1df54d6c173b23217b4c32879c4bef07453385d6..781a478cdf13b20af2194b4ba09cb144eee04755
+--- a/src/pz_save_manager/watcher.py
++++ b/src/pz_save_manager/watcher.py
+@@ -156,7 +156,12 @@
+                         self._timer.daemon = True
+                         self._timer.start()
+         if backup is not None and callback:
+-            callback(backup)
++            try:
++                callback(backup)
++            except Exception:
++                import logging
++
++                logging.getLogger(__name__).error("auto-backup callback failed", exc_info=True)
+ 
+ 
+ class WatcherManager:
+diff --git a/tests/test_gui.py b/tests/test_gui.py
+index a2d37fce7797e60b00c00303cf48c0cd7ab01ea8..7b37e04b0f866fe363b320a6dcae3a514a03ad1b
+--- a/tests/test_gui.py
++++ b/tests/test_gui.py
+@@ -3,10 +3,10 @@
+ from pathlib import Path
+ 
+ import pytest
+-from flask import Flask
++from flask import Flask, has_request_context
+ 
+ from pz_save_manager.config import ConfigStore
+-from pz_save_manager.gui import _CSRF_TOKEN, create_app
++from pz_save_manager.gui import _CSRF_TOKEN, create_app, make_auto_backup_recorder
+ from pz_save_manager.routes_api import _manager as api_manager
+ 
+ 
+@@ -56,6 +56,18 @@
+         api_manager()
+ 
+ 
++def test_auto_backup_recorder_works_outside_request_context():
++    app = Flask(__name__)
++    app.config["last_auto_backup"] = 0.0
++    recorder = make_auto_backup_recorder(app)
++
++    assert not has_request_context()
++
++    recorder(object())
++
++    assert app.config["last_auto_backup"] > 0.0
++
++
+ def test_health_rejects_non_loopback_clients(client):
+     resp = client.get("/health", environ_base={"REMOTE_ADDR": "192.168.1.50"})
+     assert resp.status_code == 403
+
+tokens used
+58 348
