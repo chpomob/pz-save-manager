@@ -54,6 +54,9 @@ def api_backup():
     if err:
         return err
     try:
+        # No progress_callback: Flask handles the request synchronously, so we
+        # cannot stream per-file progress over this single response. The frontend
+        # shows a full-screen loading overlay (see index.html) while we block here.
         result = backup_save(
             data["game_mode"],
             data["save_name"],
@@ -74,6 +77,9 @@ def api_restore():
     if err:
         return err
     try:
+        # No progress_callback: Flask handles the request synchronously, so we
+        # cannot stream per-file progress over this single response. The frontend
+        # shows a full-screen loading overlay (see index.html) while we block here.
         result = restore_save(
             _manager(),
             data["game_mode"],

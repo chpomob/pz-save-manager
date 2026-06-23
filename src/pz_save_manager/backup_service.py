@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import backup as backup_ops
 from . import saves as save_ops
@@ -22,12 +22,16 @@ def restore_save(
     *,
     saves_root: Path | str | None = None,
     backups_root: Path | str | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> dict[str, Any]:
     """Restore a backup while suppressing watcher events for the live save.
 
     Assumption: if the live save does not currently exist, there is no watcher
     to pause and the restore should still be attempted so the lower domain
     layer can return the precise backup error.
+
+    ``progress_callback`` is forwarded to :func:`backup_ops.restore_backup`
+    for per-file progress reporting (the CLI uses this; the GUI passes ``None``).
     """
     try:
         live_save = save_ops.get_save(game_mode, save_name, saves_root=saves_root)
@@ -41,6 +45,7 @@ def restore_save(
             backup_ts,
             saves_root=saves_root,
             backups_root=backups_root,
+            progress_callback=progress_callback,
         )
     return {"ok": True}
 

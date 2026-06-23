@@ -47,6 +47,12 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 .empty{text-align:center;padding:3rem;color:var(--muted)}
 .toast{position:fixed;bottom:1rem;right:1rem;background:var(--green);color:#000;padding:.7rem 1.2rem;border-radius:var(--radius);font-weight:600;z-index:99;animation:slidein .3s ease}
 @keyframes slidein{from{transform:translateY(60px);opacity:0}to{transform:translateY(0);opacity:1}}
+/* Full-screen loading overlay (backup/restore in progress) */
+#loading-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.78);z-index:200;flex-direction:column;justify-content:center;align-items:center;opacity:0;transition:opacity .2s ease}
+#loading-overlay.show{display:flex;opacity:1}
+#loading-overlay .spinner{width:30px;height:30px;border:3px solid rgba(255,255,255,.15);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
+#loading-overlay .loading-text{margin-top:1rem;color:var(--text);font-weight:600;font-size:.95rem}
+@keyframes spin{to{transform:rotate(360deg)}}
 </style>
 </head>
 <body>
@@ -138,6 +144,7 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 <p style="text-align:center;color:var(--muted);font-size:.78rem;padding:.5rem">Showing 50 of {{ backup_count }} backups.</p>
 {% endif %}
 <div id="toast" class="toast" style="display:none"></div>
+<div id="loading-overlay"><div class="spinner"></div><div class="loading-text" id="loading-text">Loading…</div></div>
 <div id="settings-overlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);z-index:100;justify-content:center;align-items:center" onclick="if(event.target===this)toggleSettings()">
 <div style="background:var(--surface);padding:2rem;border-radius:var(--radius);max-width:450px;width:90%;border:1px solid var(--accent)">
 <h3 style="margin-bottom:1rem">⚙ Settings</h3>
@@ -156,17 +163,26 @@ h3{font-size:.85rem;color:var(--muted);margin:1.2rem 0 .4rem;padding:0;font-weig
 <meta name="csrf-token" content="{{ csrf_token }}">
 <script>
 function toast(m,c){var t=document.getElementById('toast');t.textContent=m;t.style.background=c||'var(--green)';t.style.display='block';setTimeout(function(){t.style.display='none'},2500)}
+function showLoading(text){var o=document.getElementById('loading-overlay');document.getElementById('loading-text').textContent=text||'Loading…';o.classList.add('show')}
+function hideLoading(){document.getElementById('loading-overlay').classList.remove('show')}
 var csrfToken = document.querySelector('meta[name="csrf-token"]').content;
 function api(m,u,b){return fetch(u,{method:m,headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},body:b?JSON.stringify(b):undefined})}
 function doAction(b,url,body,okMsg){
   if(b)b.disabled=true;
   return api('POST',url,body).then(r=>r.json()).then(d=>{
     if(d.ok){toast(okMsg||d.message||'OK');setTimeout(function(){location.reload()},600)}
-    else{toast(d.error||d.message||'Error','var(--red)');if(b)b.disabled=false}
-  }).catch(function(){toast('Network error','var(--red)');if(b)b.disabled=false})
+    else{hideLoading();toast(d.error||d.message||'Error','var(--red)');if(b)b.disabled=false}
+  }).catch(function(){hideLoading();toast('Network error','var(--red)');if(b)b.disabled=false})
 }
-function backup(m,n,b){doAction(b,'/api/backup',{game_mode:m,save_name:n},'Backup created!')}
-function restore(m,n,t,b){if(!confirm('Restore '+m+'/'+n+' from '+t+'?'))return;doAction(b,'/api/restore',{game_mode:m,save_name:n,timestamp:t},'Restored!')}
+function backup(m,n,b){
+  showLoading('💾 Backing up…');
+  doAction(b,'/api/backup',{game_mode:m,save_name:n},'Backup created!')
+}
+function restore(m,n,t,b){
+  if(!confirm('Restore '+m+'/'+n+' from '+t+'?')){hideLoading();return;}
+  showLoading('↩ Restoring…');
+  doAction(b,'/api/restore',{game_mode:m,save_name:n,timestamp:t},'Restored!')
+}
 function deleteBackup(m,n,t,b){if(!confirm('Delete backup '+t+'?'))return;doAction(b,'/api/backup/delete',{game_mode:m,save_name:n,timestamp:t},'Deleted!')}
 function toggleWatcher(){doAction(null,'/api/watcher/toggle',null)}
 function renameSave(m,n,b){var name=prompt('New name for '+n+':');if(!name||name.trim()===''||name.trim()===n)return;doAction(b,'/api/save/rename',{game_mode:m,old_name:n,new_name:name.trim()},'Renamed to '+name.trim()+'!')}

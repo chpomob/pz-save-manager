@@ -7,6 +7,7 @@ from pathlib import Path
 
 import click
 from rich.console import Console
+from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
 from .backup import BackupError, BackupNotFound, create_backup, delete_backup, list_backups, restore_backup
@@ -75,13 +76,27 @@ def list_saves_command(ctx: click.Context) -> None:
 def backup_command(ctx: click.Context, game_mode: str, save_name: str) -> None:
     """Create a timestamped backup for a save."""
     try:
-        backup = create_backup(
-            game_mode,
-            save_name,
-            saves_root=ctx.obj["saves_root"],
-            backups_root=ctx.obj["backups_root"],
-            config=ctx.obj["config"],
-        )
+        with Progress(
+            TextColumn("[cyan]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            task_id = progress.add_task(f"Backing up {game_mode}/{save_name}…", total=None)
+
+            def _on_progress(copied: int, total: int, path: "Path") -> None:
+                progress.update(task_id, completed=copied, total=total,
+                                description=f"Copying {path}")
+
+            backup = create_backup(
+                game_mode,
+                save_name,
+                saves_root=ctx.obj["saves_root"],
+                backups_root=ctx.obj["backups_root"],
+                config=ctx.obj["config"],
+                progress_callback=_on_progress,
+            )
     except (SaveNotFound, BackupError) as exc:
         raise click.ClickException(str(exc)) from exc
     console.print(f"[green]Backup created:[/green] {backup.path}")
@@ -121,7 +136,27 @@ def restore_command(ctx: click.Context, game_mode: str, save_name: str, timestam
     if not yes:
         click.confirm(f"Restore {game_mode}/{save_name} from {timestamp}? The current save directory will be replaced.", abort=True)
     try:
-        save = restore_backup(game_mode, save_name, timestamp, saves_root=ctx.obj["saves_root"], backups_root=ctx.obj["backups_root"])
+        with Progress(
+            TextColumn("[cyan]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            task_id = progress.add_task(f"Restoring {game_mode}/{save_name}…", total=None)
+
+            def _on_progress(copied: int, total: int, path: "Path") -> None:
+                progress.update(task_id, completed=copied, total=total,
+                                description=f"Copying {path}")
+
+            save = restore_backup(
+                game_mode,
+                save_name,
+                timestamp,
+                saves_root=ctx.obj["saves_root"],
+                backups_root=ctx.obj["backups_root"],
+                progress_callback=_on_progress,
+            )
     except (BackupNotFound, BackupError) as exc:
         raise click.ClickException(str(exc)) from exc
     console.print(f"[green]Save restored:[/green] {save.path}")

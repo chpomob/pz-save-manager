@@ -8,7 +8,7 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 from uuid import uuid4
 
 from .platforms import get_backups_root, get_saves_root, resolve_path
@@ -132,6 +132,108 @@ def _skip_symlinks_and_internal(d: str, names: list[str]) -> list[str]:
     ]
 
 
+def _count_files(path: Path) -> int:
+    """Count regular files under ``path`` (excludes symlinks and directories).
+
+    Drives the "total" denominator of progress reporting.  This MUST mirror the
+    filtering applied by :func:`_copy_with_progress` (which uses
+    :func:`_skip_symlinks_and_internal`); otherwise the denominator includes
+    files that are never copied and progress can never reach ``total``.  In
+    particular ``.pz-*`` internal files/dirs (e.g. ``.pz-complete`` present in
+    every backup) and symlinks are excluded here, exactly as during copy.
+
+    os.walk does not follow symlinked directories by default, so symlinked dirs
+    are never descended into; symlinked files and internal entries are filtered
+    explicitly.
+    """
+    total = 0
+    for dirpath, dirnames, filenames in os.walk(path):
+        base = Path(dirpath)
+        # Prune internal/symlinked dirs in place so os.walk does not descend
+        # into them, matching _copy_with_progress's ignore callback.
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if not d.startswith(_INTERNAL_PREFIX) and not (base / d).is_symlink()
+        ]
+        for name in filenames:
+            if name.startswith(_INTERNAL_PREFIX):
+                continue
+            if (base / name).is_symlink():
+                continue
+            total += 1
+    return total
+
+
+def _count_symlinks(path: Path) -> int:
+    """Count symlinks (files or directories) under ``path``.
+
+    Mirrors what :func:`_skip_symlinks_and_internal` skips so callers can
+    report what is being excluded vs. processed.
+    """
+    total = 0
+    for dirpath, dirnames, filenames in os.walk(path):
+        base = Path(dirpath)
+        for name in (*dirnames, *filenames):
+            if (base / name).is_symlink():
+                total += 1
+    return total
+
+
+def _copy_with_progress(
+    src: Path,
+    dst: Path,
+    ignore: Callable[[str, list[str]], list[str]] | None = None,
+    progress_callback: Callable[[int, int, Path], None] | None = None,
+) -> Path:
+    """Recursively copy ``src`` into ``dst`` reporting per-file progress.
+
+    Drop-in replacement for ``shutil.copytree(..., copy_function=shutil.copy2)``
+    that additionally:
+
+    * counts the regular files upfront (via :func:`_count_files`) for a total,
+    * honours the ``ignore`` callback using ``shutil.copytree``'s signature
+      (``ignore(dir, names) -> names_to_skip``),
+    * preserves the symlink-skipping and ``.pz-`` internal-prefix filtering of
+      :func:`_skip_symlinks_and_internal`,
+    * invokes ``progress_callback(copied_count, total_count, relative_path)``
+      after each file is copied (``relative_path`` is a :class:`Path` relative
+      to ``src``).
+
+    Returns the destination path, matching ``shutil.copytree``.
+    """
+    src = Path(src)
+    dst = Path(dst)
+    total = _count_files(src)
+    copied = 0
+    # exist_ok=False mirrors shutil.copytree's default (dst must not exist).
+    dst.mkdir(parents=True, exist_ok=False)
+    for dirpath, dirnames, filenames in os.walk(src):
+        current = Path(dirpath)
+        rel_dir = current.relative_to(src)
+        ignored = set(ignore(dirpath, [*dirnames, *filenames])) if callable(ignore) else set()
+        # Prune ignored dirs in place so os.walk does not descend into them.
+        dirnames[:] = [d for d in dirnames if d not in ignored]
+        # Recreate (possibly empty) subdirectories so the tree mirrors source.
+        for name in dirnames:
+            (dst / rel_dir / name).mkdir(parents=True, exist_ok=True)
+        for name in filenames:
+            if name in ignored:
+                continue
+            source_file = current / name
+            # Defensive: skip symlinks even if the ignore callback missed them.
+            if source_file.is_symlink():
+                continue
+            rel_path = rel_dir / name
+            dest_file = dst / rel_path
+            dest_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_file, dest_file)
+            copied += 1
+            if progress_callback is not None:
+                progress_callback(copied, total, Path(rel_path))
+    return dst
+
+
 def _publish_temp_backup(tmp_path: Path, base_dir: Path, timestamp: str) -> tuple[str, Path]:
     """Atomically publish a copied temp backup to the first free timestamp path."""
     candidate_timestamps = [timestamp, *(f"{timestamp}-{index:02d}" for index in range(1, 100))]
@@ -162,8 +264,13 @@ def create_backup(
     now: datetime | None = None,
     auto: bool = False,
     config: "ConfigStore | None" = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> BackupRecord:
-    """Create a timestamped full backup for a save directory."""
+    """Create a timestamped full backup for a save directory.
+
+    ``progress_callback`` (optional) is invoked as ``(copied, total, path)``
+    after each file is copied, where ``path`` is relative to the save root.
+    """
     _validate_component(game_mode, "game mode")
     _validate_component(save_name, "save name")
     if now is None:
@@ -174,17 +281,20 @@ def create_backup(
     timestamp = _timestamp(now)
     tmp_path = backup_base / f".tmp-{timestamp}-{uuid4().hex[:8]}"
     try:
-        shutil.copytree(save.path, tmp_path, copy_function=shutil.copy2,
-                        ignore=_skip_symlinks_and_internal)
-        # Write completion marker inside temp dir BEFORE atomic rename
-        # so a crash between rename and marker never leaves an orphan.
+        _copy_with_progress(save.path, tmp_path,
+                            ignore=_skip_symlinks_and_internal,
+                            progress_callback=progress_callback)
+        # Write metadata markers inside the temp dir BEFORE the atomic rename so
+        # they are published together with the backup.  Writing .pz-auto after
+        # publish (the old behaviour) and swallowing OSError could leave an
+        # auto-backup with no .pz-auto marker — indistinguishable from a manual
+        # backup, so prune_auto_backups would never reclaim it and disk usage
+        # could grow past max_auto_backups.  Any failure here now propagates and
+        # the temp dir is cleaned up in the except clause below.
         (tmp_path / _COMPLETE_FILE).touch()
-        timestamp, destination = _publish_temp_backup(tmp_path, backup_base, timestamp)
         if auto:
-            try:
-                (destination / _AUTO_FILE).touch()
-            except OSError:
-                pass
+            (tmp_path / _AUTO_FILE).touch()
+        timestamp, destination = _publish_temp_backup(tmp_path, backup_base, timestamp)
     except Exception:
         shutil.rmtree(tmp_path, ignore_errors=True)
         raise
@@ -208,6 +318,13 @@ def list_backups(
     """List backups, optionally filtered by game mode and save name."""
     if save_name is not None and game_mode is None:
         raise BackupError("A game mode is required when filtering by save name")
+    # Validate caller-supplied filters before they are joined into paths.
+    # Without this, a filter like ".." escapes backups_root and could
+    # enumerate sibling directories (parity with get/create/delete).
+    if game_mode is not None:
+        _validate_component(game_mode, "game mode")
+    if save_name is not None:
+        _validate_component(save_name, "save name")
     root = resolve_path(backups_root) or get_backups_root()
     if not root.is_dir():
         return []
@@ -260,16 +377,22 @@ def restore_backup(
     *,
     saves_root: Path | str | None = None,
     backups_root: Path | str | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> SaveGame:
-    """Restore a backup over the live save directory."""
+    """Restore a backup over the live save directory.
+
+    ``progress_callback`` (optional) is invoked as ``(copied, total, path)``
+    after each file is copied, where ``path`` is relative to the backup root.
+    """
     backup = get_backup(game_mode, save_name, timestamp, backups_root=backups_root)
     target = (resolve_path(saves_root) or get_saves_root()) / game_mode / save_name
     target.parent.mkdir(parents=True, exist_ok=True)
     temp_target = target.with_name(f".{target.name}.restore-{uuid4().hex}.tmp")
     previous_target = target.with_name(f".{target.name}.restore-old-{uuid4().hex}")
     try:
-        shutil.copytree(backup.path, temp_target, copy_function=shutil.copy2,
-                        ignore=_skip_symlinks_and_internal)
+        _copy_with_progress(backup.path, temp_target,
+                            ignore=_skip_symlinks_and_internal,
+                            progress_callback=progress_callback)
         if target.exists():
             target.rename(previous_target)
         temp_target.rename(target)
